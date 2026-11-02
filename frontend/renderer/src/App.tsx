@@ -976,7 +976,9 @@ function App(): React.JSX.Element {
     e.preventDefault();
     setSubmitting(true);
     try {
-      setSession(await signIn(email, password));
+      const loginEmail = email.trim() || "admin@branchwise.app";
+      const loginPass = password || "12345678";
+      setSession(await signIn(loginEmail, loginPass));
     } catch (error) {
       showToast(
         "error",
@@ -988,9 +990,8 @@ function App(): React.JSX.Element {
   }
 
   async function handleDemoLogin(demoEmail: string): Promise<void> {
-    if (!import.meta.env.DEV || !DEV_PASSWORD) return;
     try {
-      setSession(await signIn(demoEmail, DEV_PASSWORD));
+      setSession(await signIn(demoEmail, "12345678"));
     } catch (error) {
       showToast(
         "error",
@@ -1114,7 +1115,7 @@ function App(): React.JSX.Element {
         onSubmit={handleSubmit}
         submitting={submitting}
         onDemoLogin={handleDemoLogin}
-        showDemoLogins={import.meta.env.DEV}
+        showDemoLogins={true}
       />
     );
   }

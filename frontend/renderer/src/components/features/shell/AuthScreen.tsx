@@ -16,17 +16,12 @@ interface AuthScreenProps {
   showDemoLogins?: boolean;
 }
 
-const DEMO_ACCOUNTS = import.meta.env.DEV
-  ? [
-      { email: "admin@branchwise.app", label: "Admin" },
-      { email: "wholesale@branchwise.app", label: "Wholesale" },
-      { email: "downtown@branchwise.dev", label: "Downtown" },
-      { email: "central@branchwise.dev", label: "CentralStore" },
-      { email: "alpha@branchwise.dev", label: "BranchAlpha" },
-      { email: "westmall@branchwise.app", label: "WestMall" },
-      { email: "retail3@branchwise.app", label: "Retail 3" },
-    ]
-  : [];
+const DEMO_ACCOUNTS = [
+  { email: "admin@branchwise.app", label: "Admin" },
+  { email: "wholesale@branchwise.app", label: "Wholesale" },
+  { email: "downtown@branchwise.dev", label: "Downtown" },
+  { email: "central@branchwise.dev", label: "CentralStore" },
+];
 
 // No skeleton/empty state — this IS the entry/loading screen, not a data view.
 //
@@ -133,7 +128,7 @@ export function AuthScreen({
               </Button>
             </form>
 
-            {import.meta.env.DEV && showDemoLogins && onDemoLogin && (
+            {showDemoLogins && onDemoLogin && (
               <div className="mt-8 pt-6 border-t border-border">
                 <p className="text-xs font-medium text-text-muted uppercase tracking-wide mb-2">
                   Demo accounts

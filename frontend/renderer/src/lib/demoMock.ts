@@ -94,37 +94,45 @@ export function setupDemoMock(): void {
       return originalFetch(input, init);
     }
 
-    try {
-      const resp = await originalFetch(input, init);
-      if (resp.ok || resp.status === 401) {
-        return resp;
+    // Check if we have a real remote backend URL configured
+    const configuredApiUrl = (import.meta.env.VITE_API_BASE_URL || "").trim();
+    const hasLiveBackend = Boolean(configuredApiUrl && !configuredApiUrl.includes("your-backend") && !configuredApiUrl.includes("127.0.0.1") && !configuredApiUrl.includes("localhost"));
+
+    if (hasLiveBackend) {
+      try {
+        const resp = await originalFetch(input, init);
+        const cType = resp.headers.get("content-type") || "";
+        if (resp.ok && cType.includes("application/json")) {
+          return resp;
+        }
+      } catch {
+        // Fall back to Mock
       }
-    } catch {
-      // Backend unreachable or network failure -> Fall through to Mock Layer
     }
 
-    const method = (init?.method || "GET").toUpperCase();
-    const url = new URL(urlStr, window.location.origin);
-    const path = url.pathname;
-
+    // Mock response helper
     const json = (data: unknown, status = 200) =>
       new Response(JSON.stringify(data), {
         status,
         headers: { "Content-Type": "application/json" },
       });
 
+    const method = (init?.method || "GET").toUpperCase();
+    const url = new URL(urlStr, window.location.origin);
+    const path = url.pathname;
+
     // 1. Auth & Me
-    if (path.endsWith("/api/auth/login") && method === "POST") {
-      let email = "";
+    if (path.includes("/api/auth/login") || path.endsWith("/auth/login")) {
+      let email = "admin@branchwise.app";
       try {
         if (init?.body) {
           const body = JSON.parse(init.body as string);
-          email = body.email || "";
+          if (body.email) email = body.email;
         }
       } catch {}
       currentUser = DEMO_USERS[email] || {
         id: "usr-custom",
-        email: email || "admin@branchwise.app",
+        email: email,
         name: email.split("@")[0] || "Demo User",
         role: email.includes("wholesale") ? "wholesale" : "admin",
         branch_id: null,
@@ -137,38 +145,38 @@ export function setupDemoMock(): void {
       });
     }
 
-    if (path.endsWith("/api/auth/logout")) {
+    if (path.includes("/api/auth/logout") || path.endsWith("/auth/logout")) {
       currentUser = DEFAULT_USER;
       return json({ status: "ok" });
     }
 
-    if (path.endsWith("/api/auth/refresh")) {
+    if (path.includes("/api/auth/refresh") || path.endsWith("/auth/refresh")) {
       return json({ access_token: "mock-jwt-token-" + currentUser.role, session: "mock-session-token" });
     }
 
-    if (path.endsWith("/api/me")) {
+    if (path.includes("/api/me") || path.endsWith("/me")) {
       return json(currentUser);
     }
 
     // 2. Health & Heartbeats
-    if (path.endsWith("/api/health") || path.endsWith("/api/health/db")) {
+    if (path.includes("/api/health")) {
       return json({ status: "ok", database: "ok" });
     }
 
     // 3. Branches & Settings
-    if (path.endsWith("/api/branches")) {
+    if (path.includes("/api/branches")) {
       return json(DEMO_BRANCHES);
     }
 
-    if (path.endsWith("/api/settings")) {
-      return json(DEMO_SETTINGS);
-    }
-
-    if (path.endsWith("/api/settings/theme")) {
+    if (path.includes("/api/settings/theme")) {
       return json({ theme: "light" });
     }
 
-    if (path.endsWith("/api/imports/data-version")) {
+    if (path.includes("/api/settings")) {
+      return json(DEMO_SETTINGS);
+    }
+
+    if (path.includes("/api/imports/data-version")) {
       return json({ version: 1 });
     }
 
@@ -301,7 +309,7 @@ export function setupDemoMock(): void {
     }
 
     // 5. Retail Sales, Inventory & Purchases
-    if (path.endsWith("/api/sales")) {
+    if (path.includes("/api/sales")) {
       return json({
         total: 1240,
         page: 1,
@@ -378,7 +386,7 @@ export function setupDemoMock(): void {
     }
 
     // 6. Warnings & Alerts
-    if (path.endsWith("/api/warnings")) {
+    if (path.includes("/api/warnings")) {
       return json({
         inventory_mismatch_count: 0,
         sale_numeric_issues: 0,
