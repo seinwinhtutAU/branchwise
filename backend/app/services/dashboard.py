@@ -1,0 +1,1712 @@
+"""Aggregation for the per-branch retail dashboard (see docs/retail/dashboard.md).
+
+One branch at a time, never a cross-branch rollup, for every tab except Inventory's
+stock-health figures — the caller resolves which branch first (see
+app/retail/routers/dashboard.py), and every query here is scoped to that one branch_id
+directly rather than reusing the nullable-branch_id pattern the row-level list
+endpoints (GET /api/sales etc.) use for admin's "every branch" view, since that view
+doesn't apply to a period-scoped tab like Revenue or Cost. compute_stock_health is the
+one exception: current stock has no period control (see STOCK_VELOCITY_WINDOW_DAYS's
+comment), and its figures are also the source of truth for the standalone Low Stock /
+Dead Stock list pages, which do need an "every branch" view — see its own docstring.
+"""
+
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Literal
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.models.branch import Branch
+from app.services.branches import list_retail_branches
+from app.retail.models.product import Product
+from app.retail.models.sale import Sale, SaleLine
+from app.retail.models.stock_level import StockLevel
+from app.retail.models.zero_selling import ZeroSellingRecord
+from app.retail.services.operating_cost import profit_breakdown
+from app.retail.services.pricing import sale_line_pricer
+from app.retail.services.stock import latest_stock_query
+from app.retail.services.reporting import each_day, kpi_value
+
+PeriodKey = Literal["today", "yesterday", "7d", "30d", "monthly", "yearly"]
+# "7d"/"30d" are no longer offered by the Dashboard's own period picker (see
+# dashboard/usePeriodRange.ts on the frontend) but stay valid here — the Health
+# (Overview) tab and Business Alerts still use them and share this same set.
+VALID_PERIODS: frozenset[str] = frozenset(
+    {"today", "yesterday", "7d", "30d", "monthly", "yearly"}
+)
+
+TOP_PRODUCTS_LIMIT = 10
+# Sales/footfall-by-day-&-hour heatmap columns — one column per hour, business hours
+# only (7am-10pm). A retail shop's overnight hours are always empty, so a 24-hour grid
+# just wastes columns on dead space; a sale outside this window (rare — a bad sale_time
+# parse, or a genuine after-hours entry) simply doesn't appear on the heatmap at all,
+# same tolerant-drop stance _parse_hour already takes for an unparseable time.
+HEATMAP_START_HOUR = 7
+HEATMAP_END_HOUR = 22  # exclusive — the last column covers 21:00-22:00
+
+# Inventory tab has no period control (current stock is a point-in-time fact), so its
+# sales-velocity estimate for "days of stock left" uses its own fixed trailing window
+# instead of whatever period another tab happens to have selected.
+STOCK_VELOCITY_WINDOW_DAYS = 30
+CRITICAL_DAYS_OF_STOCK = 3
+LOW_DAYS_OF_STOCK = 7
+WATCH_DAYS_OF_STOCK = 14
+LOW_STOCK_ITEMS_LIMIT = 50
+
+# Dead stock uses its own, longer window than the days-of-stock velocity above — 30
+# days with no sale is routine for a slow-but-fine product; 90 days with no sale at all
+# (while still sitting on the shelf) is a much stronger "this isn't moving" signal.
+DEAD_STOCK_WINDOW_DAYS = 90
+DEAD_STOCK_ITEMS_LIMIT = 50
+
+# The stretch of time *before* the recent velocity window, derived from the two windows
+# above rather than declared separately so it can never drift out of step with them.
+# Comparing the recent daily rate against this earlier one is what separates "demand
+# went up" from "stock was left to run down" for a product about to run out — the two
+# call for different responses (reorder more, versus reorder sooner).
+BASELINE_VELOCITY_WINDOW_DAYS = DEAD_STOCK_WINDOW_DAYS - STOCK_VELOCITY_WINDOW_DAYS
+
+# sale_time is free text (see app/retail/models/sale.py) — whatever the POS export happened
+# to print, not a validated time type — so parsing is best-effort: try common shapes,
+# and a row that doesn't match any of them is simply left out of the heatmap rather
+# than raising, the same tolerant-parsing stance the rest of the import pipeline takes.
+_TIME_FORMATS = ["%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p"]
+
+
+@dataclass(frozen=True)
+class PeriodRange:
+    start: date
+    end: date
+    previous_start: date
+    previous_end: date
+
+
+def _resolve_month(month: str, today: date) -> tuple[date, date]:
+    """The calendar month named by `month` (`YYYY-MM`) — the current, in-progress month
+    reads as "1st to today" (e.g. "Sep 1-23"), same as the frontend's own month labels;
+    any earlier month reads as its full span (e.g. "Aug 1-30")."""
+    year_str, _, month_str = month.partition("-")
+    start = date(int(year_str), int(month_str), 1)
+    if start.year == today.year and start.month == today.month:
+        return start, today
+    next_month = date(start.year + start.month // 12, start.month % 12 + 1, 1)
+    return start, next_month - timedelta(days=1)
+
+
+def _year_ago(d: date) -> date:
+    """The same month/day one year earlier — Feb 29 in a leap year clamps to Feb 28,
+    since the year before (or after) it usually has no Feb 29 of its own."""
+    try:
+        return d.replace(year=d.year - 1)
+    except ValueError:
+        return d.replace(year=d.year - 1, day=28)
+
+
+# A window this short or shorter is compared with the same weekdays last year rather than
+# the same dates (see resolve_period).
+WEEKDAY_ALIGNED_MAX_DAYS = 7
+
+ComparisonMode = Literal["previous_period", "year_ago"]
+
+
+def resolve_period(
+    period: PeriodKey,
+    today: date | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    # Which calendar month `period="monthly"` means, as `YYYY-MM` — defaults to the
+    # current month (the router validates the format and that it isn't in the future
+    # before this ever runs; see _validate_period_or_dates).
+    month: str | None = None,
+    # "previous_period" (the default) is the immediately-preceding window of the same
+    # length — Overview and Summary still compare this way. Revenue/Cost/Customer pass
+    # "year_ago" instead: the same dates one year earlier, since a shop's day-to-day
+    # swings (a slow Tuesday, a holiday week) make the window right before it a noisy
+    # baseline, and this business's real sales pattern repeats yearly, not weekly.
+    comparison: ComparisonMode = "previous_period",
+) -> PeriodRange:
+    """The selected window, plus a comparison window used for every KPI's delta — see
+    `comparison` above for which window that is.
+
+    A caller-chosen `date_from`/`date_to` (both required together) overrides `period`
+    entirely.
+    """
+    today = today or date.today()
+    if date_from is not None and date_to is not None:
+        if date_from > date_to:
+            raise ValueError("date_from must be on or before date_to")
+        start, end = date_from, date_to
+    elif period == "monthly":
+        start, end = _resolve_month(month or today.strftime("%Y-%m"), today)
+    elif period == "yearly":
+        start = date(today.year, 1, 1)
+        end = today
+    elif period == "today":
+        start = end = today
+    elif period == "yesterday":
+        start = end = today - timedelta(days=1)
+    elif period == "7d":
+        start = today - timedelta(days=6)
+        end = today
+    elif period == "30d":
+        start = today - timedelta(days=29)
+        end = today
+    else:
+        raise ValueError(f"Unknown period: {period!r}")
+
+    if period == "yearly":
+        # Yearly comparisons always use the matching dates in the preceding year,
+        # including for Summary/Overview callers that otherwise compare the prior window.
+        previous_start = _year_ago(start)
+        previous_end = _year_ago(end)
+    elif comparison == "year_ago":
+        if (end - start).days + 1 <= WEEKDAY_ALIGNED_MAX_DAYS:
+            # A day or a week: the same *weekdays* a year earlier (52 weeks back), not the
+            # same dates — this Wednesday against last year's Wednesday, since a Saturday
+            # and a Wednesday are not comparable in a shop whose sales swing by weekday.
+            previous_start = start - timedelta(days=364)
+            previous_end = end - timedelta(days=364)
+        else:
+            previous_start = _year_ago(start)
+            previous_end = _year_ago(end)
+    else:
+        window_days = (end - start).days + 1
+        previous_end = start - timedelta(days=1)
+        previous_start = previous_end - timedelta(days=window_days - 1)
+    return PeriodRange(start, end, previous_start, previous_end)
+
+
+def _period_label(period: PeriodKey, date_from: date | None, date_to: date | None) -> str:
+    """What the response's own `period` field says — "custom" whenever the caller
+    picked an explicit range, regardless of what (if anything) the `period` query
+    param happened to also carry."""
+    return "custom" if date_from is not None and date_to is not None else period
+
+
+def _revenue_totals(db: Session, branch_id: str, start: date, end: date) -> tuple[float, int]:
+    net_revenue, transaction_count = (
+        db.query(
+            func.coalesce(func.sum(SaleLine.net_amount), 0),
+            func.count(func.distinct(Sale.id)),
+        )
+        .join(Sale, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .one()
+    )
+    return float(net_revenue), int(transaction_count)
+
+
+def _quantity_sold(db: Session, branch_id: str, start: date, end: date) -> float:
+    """Pairs sold in the window — the sum of every sale line's quantity."""
+    quantity = (
+        db.query(func.coalesce(func.sum(SaleLine.qty), 0))
+        .join(Sale, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .scalar()
+    )
+    return float(quantity or 0)
+
+
+_kpi = kpi_value
+
+
+def _optional_kpi(value: float | None, previous_value: float | None) -> dict:
+    """A KPI that may have no figure — conversion rate has none where no zero-selling
+    records were imported. Nothing is measured then, which is not the same as 0%, so
+    the value stays None and there is no change to show."""
+    if value is None or previous_value is None:
+        return {"value": value, "previous_value": previous_value, "delta_pct": None}
+    return _kpi(value, previous_value)
+
+
+_each_day = each_day
+
+
+def _daily_trend(db: Session, branch_id: str, start: date, end: date) -> list[dict]:
+    rows = (
+        db.query(Sale.sale_date, func.coalesce(func.sum(SaleLine.net_amount), 0))
+        .join(SaleLine, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .group_by(Sale.sale_date)
+        .all()
+    )
+    by_date = {sale_date: float(total) for sale_date, total in rows}
+    return [
+        {"date": day.isoformat(), "net_revenue": by_date.get(day, 0.0)}
+        for day in _each_day(start, end)
+    ]
+
+
+def _top_products(
+    db: Session, branch_id: str, start: date, end: date, limit: int = TOP_PRODUCTS_LIMIT
+) -> list[dict]:
+    rows = (
+        db.query(
+            Product.stock_code,
+            Product.description,
+            func.coalesce(func.sum(SaleLine.qty), 0),
+            func.coalesce(func.sum(SaleLine.net_amount), 0),
+            # Qty-weighted, not a plain average of the line-level prices — a product
+            # sold 1 unit at one price and 100 units at another should read close to
+            # that second price, not halfway between the two.
+            func.coalesce(func.sum(SaleLine.selling_price * SaleLine.qty), 0),
+        )
+        .join(SaleLine, SaleLine.product_id == Product.id)
+        .join(Sale, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .group_by(Product.id, Product.stock_code, Product.description)
+        .order_by(func.sum(SaleLine.net_amount).desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "stock_code": code,
+            "description": description,
+            "qty": float(qty),
+            "net_revenue": float(net),
+            "avg_selling_price": float(weighted_price) / float(qty) if qty else None,
+        }
+        for code, description, qty, net, weighted_price in rows
+    ]
+
+
+def _parse_hour(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    raw = raw.strip()
+    if " " in raw and ":" in raw:
+        # e.g. "2026-09-04 18:30:00"
+        time_part = raw.split(" ")[-1]
+        if ":" in time_part:
+            raw = time_part
+    elif "T" in raw and ":" in raw:
+        time_part = raw.split("T")[-1]
+        if ":" in time_part:
+            raw = time_part
+    if "." in raw:
+        raw = raw.split(".")[0]
+    for fmt in ["%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p", "%I:%M%p", "%H"]:
+        try:
+            return datetime.strptime(raw, fmt).hour
+        except ValueError:
+            continue
+    if ":" in raw:
+        parts = raw.split(":")
+        if parts[0].isdigit():
+            hr = int(parts[0])
+            if 0 <= hr <= 23:
+                return hr
+    return None
+
+
+def _hour_band_label(hour: int) -> str | None:
+    """One column per hour, business hours only — None outside [HEATMAP_START_HOUR,
+    HEATMAP_END_HOUR), meaning "leave this row out of the heatmap entirely" rather
+    than lumping it into an edge bucket that would misrepresent when it happened."""
+    if hour < HEATMAP_START_HOUR or hour >= HEATMAP_END_HOUR:
+        return None
+    return f"{hour:02d}-{hour + 1:02d}"
+
+
+def _bucket_heatmap(rows, value_key: str) -> list[dict]:
+    """Sum (sale_date, sale_time, value) rows into the weekday × hour-band grid both
+    heatmaps share; a row whose time can't be parsed or falls outside business hours
+    is left out entirely (see _hour_band_label)."""
+    totals: dict[tuple[int, str], float] = {}
+    for sale_date, sale_time, value in rows:
+        hour = _parse_hour(sale_time)
+        band = _hour_band_label(hour) if hour is not None else None
+        if band is None:
+            continue
+        key = (sale_date.weekday(), band)
+        totals[key] = totals.get(key, 0) + value
+    return [
+        {"weekday": weekday, "hour_band": hour_band, value_key: total}
+        for (weekday, hour_band), total in sorted(totals.items())
+    ]
+
+
+def _revenue_heatmap(db: Session, branch_id: str, start: date, end: date) -> list[dict]:
+    rows = (
+        db.query(Sale.sale_date, Sale.sale_time, SaleLine.net_amount)
+        .join(SaleLine, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .all()
+    )
+    return _bucket_heatmap(
+        ((sale_date, sale_time, float(net_amount or 0)) for sale_date, sale_time, net_amount in rows),
+        "net_revenue",
+    )
+
+
+def _monthly_sales_totals(
+    db: Session, branch_id: str, start: date, end: date
+) -> dict[int, dict[str, float]]:
+    """Return the three sales measures grouped by calendar month in a window.
+
+    The query groups by day first, keeping the response small even for a busy branch,
+    while counting distinct slips rather than sale lines for transactions.
+    """
+    rows = (
+        db.query(
+            Sale.sale_date,
+            func.coalesce(func.sum(SaleLine.net_amount), 0),
+            func.coalesce(func.sum(SaleLine.qty), 0),
+            func.count(func.distinct(Sale.id)),
+        )
+        .join(SaleLine, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .group_by(Sale.sale_date)
+        .all()
+    )
+    totals = {
+        month: {"revenue": 0.0, "quantity": 0.0, "transactions": 0.0}
+        for month in range(1, 13)
+    }
+    for sale_date, revenue, quantity, transactions in rows:
+        month = totals[sale_date.month]
+        month["revenue"] += float(revenue or 0)
+        month["quantity"] += float(quantity or 0)
+        month["transactions"] += float(transactions or 0)
+    return totals
+
+
+def _sales_performance(
+    db: Session, branch_id: str, period_range: PeriodRange
+) -> dict:
+    """Build the same-period year-over-year data used by Revenue's Sales Performance view."""
+    current_year = period_range.end.year
+    previous_year = period_range.previous_end.year
+    current = _monthly_sales_totals(db, branch_id, period_range.start, period_range.end)
+    previous = _monthly_sales_totals(
+        db, branch_id, period_range.previous_start, period_range.previous_end
+    )
+
+    current_totals = {
+        key: sum(month[key] for month in current.values())
+        for key in ("revenue", "quantity", "transactions")
+    }
+    previous_totals = {
+        key: sum(month[key] for month in previous.values())
+        for key in ("revenue", "quantity", "transactions")
+    }
+    current_totals["revenue_per_pair"] = (
+        current_totals["revenue"] / current_totals["quantity"]
+        if current_totals["quantity"]
+        else 0.0
+    )
+    previous_totals["revenue_per_pair"] = (
+        previous_totals["revenue"] / previous_totals["quantity"]
+        if previous_totals["quantity"]
+        else 0.0
+    )
+
+    kpis = {
+        key: _kpi(current_totals[key], previous_totals[key])
+        for key in ("revenue", "quantity", "transactions", "revenue_per_pair")
+    }
+    monthly = [
+        {
+            "month": month,
+            "current": current[month],
+            "previous": previous[month],
+        }
+        for month in range(1, 13)
+    ]
+    return {
+        "current_year": current_year,
+        "previous_year": previous_year,
+        "kpis": kpis,
+        "monthly": monthly,
+    }
+
+
+def build_revenue_dashboard(
+    db: Session,
+    branch_id: str,
+    branch_name: str,
+    period: PeriodKey,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict:
+    period_range = resolve_period(
+        period, date_from=date_from, date_to=date_to, month=month, comparison="year_ago"
+    )
+    net_revenue, transaction_count = _revenue_totals(
+        db, branch_id, period_range.start, period_range.end
+    )
+    prev_net_revenue, prev_transaction_count = _revenue_totals(
+        db, branch_id, period_range.previous_start, period_range.previous_end
+    )
+    avg_basket = net_revenue / transaction_count if transaction_count else 0.0
+    prev_avg_basket = prev_net_revenue / prev_transaction_count if prev_transaction_count else 0.0
+    quantity_sold = _quantity_sold(db, branch_id, period_range.start, period_range.end)
+    prev_quantity_sold = _quantity_sold(
+        db, branch_id, period_range.previous_start, period_range.previous_end
+    )
+
+    return {
+        "branch_id": branch_id,
+        "branch_name": branch_name,
+        "period": _period_label(period, date_from, date_to),
+        "date_from": period_range.start.isoformat(),
+        "date_to": period_range.end.isoformat(),
+        "net_revenue": _kpi(net_revenue, prev_net_revenue),
+        "transaction_count": _kpi(float(transaction_count), float(prev_transaction_count)),
+        "avg_basket": _kpi(avg_basket, prev_avg_basket),
+        "quantity_sold": _kpi(quantity_sold, prev_quantity_sold),
+        "trend": _daily_trend(db, branch_id, period_range.start, period_range.end),
+        "top_products": _top_products(db, branch_id, period_range.start, period_range.end),
+        "heatmap": _revenue_heatmap(db, branch_id, period_range.start, period_range.end),
+        "sales_performance": _sales_performance(db, branch_id, period_range),
+    }
+
+
+def build_all_revenue_dashboard(
+    db: Session,
+    period: PeriodKey,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict:
+    """Aggregate the Revenue tab across all retail branches.
+
+    This deliberately returns the same shape as the branch Revenue endpoint so the
+    existing charts and drill-down UI keep one visual language for both scopes.
+    """
+    branches = list_retail_branches(db).all()
+    period_range = resolve_period(
+        period, date_from=date_from, date_to=date_to, month=month, comparison="year_ago"
+    )
+    branch_data = [
+        build_revenue_dashboard(
+            db,
+            branch.id,
+            branch.name,
+            period,
+            date_from=date_from,
+            date_to=date_to,
+            month=month,
+        )
+        for branch in branches
+    ]
+
+    def summed_kpi(key: str) -> dict:
+        current = sum(item[key]["value"] for item in branch_data)
+        previous = sum(item[key]["previous_value"] for item in branch_data)
+        return _kpi(current, previous)
+
+    net_revenue = sum(item["net_revenue"]["value"] for item in branch_data)
+    previous_net_revenue = sum(item["net_revenue"]["previous_value"] for item in branch_data)
+    transactions = sum(item["transaction_count"]["value"] for item in branch_data)
+    previous_transactions = sum(
+        item["transaction_count"]["previous_value"] for item in branch_data
+    )
+    quantity = sum(item["quantity_sold"]["value"] for item in branch_data)
+    previous_quantity = sum(item["quantity_sold"]["previous_value"] for item in branch_data)
+
+    trend_by_date: dict[str, float] = {}
+    heatmap_by_key: dict[tuple[int, str], float] = {}
+    products_by_key: dict[tuple[str, str], dict[str, float | str]] = {}
+    for item in branch_data:
+        for point in item["trend"]:
+            trend_by_date[point["date"]] = trend_by_date.get(point["date"], 0.0) + point[
+                "net_revenue"
+            ]
+        for cell in item["heatmap"]:
+            key = (cell["weekday"], cell["hour_band"])
+            heatmap_by_key[key] = heatmap_by_key.get(key, 0.0) + cell["net_revenue"]
+        for product in item["top_products"]:
+            key = (product["stock_code"], product["description"])
+            existing = products_by_key.setdefault(
+                key,
+                {"stock_code": product["stock_code"], "description": product["description"], "qty": 0.0, "net_revenue": 0.0},
+            )
+            existing["qty"] = float(existing["qty"]) + product["qty"]
+            existing["net_revenue"] = float(existing["net_revenue"]) + product["net_revenue"]
+
+    top_products = []
+    for product in products_by_key.values():
+        product_qty = float(product["qty"])
+        product_revenue = float(product["net_revenue"])
+        top_products.append(
+            {
+                "stock_code": product["stock_code"],
+                "description": product["description"],
+                "qty": product_qty,
+                "net_revenue": product_revenue,
+                "avg_selling_price": product_revenue / product_qty if product_qty else None,
+            }
+        )
+    top_products.sort(key=lambda product: product["net_revenue"], reverse=True)
+
+    monthly = []
+    for month_number in range(1, 13):
+        current = {"revenue": 0.0, "quantity": 0.0, "transactions": 0.0}
+        previous = {"revenue": 0.0, "quantity": 0.0, "transactions": 0.0}
+        for item in branch_data:
+            month_data = item["sales_performance"]["monthly"][month_number - 1]
+            for key in current:
+                current[key] += month_data["current"][key]
+                previous[key] += month_data["previous"][key]
+        monthly.append({"month": month_number, "current": current, "previous": previous})
+
+    return {
+        "branch_id": "",
+        "branch_name": "All Branches",
+        "period": _period_label(period, date_from, date_to),
+        "date_from": period_range.start.isoformat(),
+        "date_to": period_range.end.isoformat(),
+        "net_revenue": summed_kpi("net_revenue"),
+        "transaction_count": summed_kpi("transaction_count"),
+        "avg_basket": _kpi(
+            net_revenue / transactions if transactions else 0.0,
+            previous_net_revenue / previous_transactions if previous_transactions else 0.0,
+        ),
+        "quantity_sold": summed_kpi("quantity_sold"),
+        "trend": [
+            {
+                "date": day.isoformat(),
+                "net_revenue": trend_by_date.get(day.isoformat(), 0.0),
+            }
+            for day in _each_day(period_range.start, period_range.end)
+        ],
+        "top_products": top_products[:TOP_PRODUCTS_LIMIT],
+        "heatmap": [
+            {"weekday": weekday, "hour_band": hour_band, "net_revenue": revenue}
+            for (weekday, hour_band), revenue in sorted(heatmap_by_key.items())
+        ],
+        "sales_performance": {
+            "current_year": period_range.end.year,
+            "previous_year": period_range.previous_end.year,
+            "kpis": {
+                "revenue": _kpi(net_revenue, previous_net_revenue),
+                "quantity": _kpi(quantity, previous_quantity),
+                "transactions": _kpi(transactions, previous_transactions),
+                "revenue_per_pair": _kpi(
+                    net_revenue / quantity if quantity else 0.0,
+                    previous_net_revenue / previous_quantity if previous_quantity else 0.0,
+                ),
+            },
+            "monthly": monthly,
+        },
+    }
+
+
+# --- Cost -------------------------------------------------------------------------
+
+
+def _cost_totals_and_products(
+    db: Session,
+    branch_id: str,
+    start: date,
+    end: date,
+    limit: int | None = TOP_PRODUCTS_LIMIT,
+) -> tuple[float, float, float, int, list[dict], list[dict]]:
+    """One pass over the period's sale lines that produces both the branch-wide
+    COGS/revenue totals and the per-product cost breakdown, reusing the exact same
+    point-in-time cost lookup (app/retail/services/pricing.py) the Sale tab and Warning page
+    already use — rather than a second, differently-computed cost figure.
+
+    Returns (net_revenue, cogs, priced_net_revenue, transaction_count, products, trend).
+    `priced_net_revenue` is the slice of net_revenue whose line actually had a cost
+    estimate — the denominator for "how much of this margin figure is real," which the
+    branch health score needs before it will score Profit at all (see
+    app/retail/services/branch_health.py). COGS alone can't answer that: a small COGS means
+    either genuinely cheap goods or mostly-unpriced lines, and those are opposite facts.
+    """
+    rows = (
+        db.query(SaleLine, Sale, Product)
+        .join(Sale, SaleLine.sale_id == Sale.id)
+        .join(Product, SaleLine.product_id == Product.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .all()
+    )
+    price_for = sale_line_pricer(db, {product.id for _, _, product in rows})
+
+    net_revenue_total = 0.0
+    cogs_total = 0.0
+    priced_net_revenue_total = 0.0
+    transaction_ids: set[str] = set()
+    per_product: dict[str, dict] = {}
+    per_day: dict[date, dict] = {}
+
+    for sale_line, sale, product in rows:
+        net_amount = float(sale_line.net_amount or 0)
+        qty = float(sale_line.qty or 0)
+        net_revenue_total += net_amount
+        transaction_ids.add(sale.id)
+
+        buying_price, _source = price_for(product.id, sale.sale_date)
+        cost = float(buying_price) * qty if buying_price is not None else None
+        if cost is not None:
+            cogs_total += cost
+            priced_net_revenue_total += net_amount
+
+        bucket = per_product.setdefault(
+            product.id,
+            {
+                "stock_code": product.stock_code,
+                "description": product.description,
+                "qty": 0.0,
+                "net_revenue": 0.0,
+                "estimated_cost": 0.0,
+                "priced_qty": 0.0,
+            },
+        )
+        bucket["qty"] += qty
+        bucket["net_revenue"] += net_amount
+        if cost is not None:
+            bucket["estimated_cost"] += cost
+            bucket["priced_qty"] += qty
+
+        day_bucket = per_day.setdefault(
+            sale.sale_date, {"net_revenue": 0.0, "estimated_cost": 0.0, "priced_qty": 0.0}
+        )
+        day_bucket["net_revenue"] += net_amount
+        if cost is not None:
+            day_bucket["estimated_cost"] += cost
+            day_bucket["priced_qty"] += qty
+
+    products = []
+    for bucket in per_product.values():
+        # A product with zero priced lines has no cost estimate at all — None (shown as
+        # "—"), never a silent 0, since 0 would read as "this costs nothing."
+        has_cost = bucket["priced_qty"] > 0
+        estimated_cost = bucket["estimated_cost"] if has_cost else None
+        estimated_margin = (bucket["net_revenue"] - estimated_cost) if has_cost else None
+        margin_pct = (
+            (estimated_margin / bucket["net_revenue"] * 100)
+            if has_cost and bucket["net_revenue"]
+            else None
+        )
+        products.append(
+            {
+                "stock_code": bucket["stock_code"],
+                "description": bucket["description"],
+                "qty": bucket["qty"],
+                "net_revenue": bucket["net_revenue"],
+                "estimated_cost": estimated_cost,
+                "estimated_margin": estimated_margin,
+                "margin_pct": margin_pct,
+            }
+        )
+    # Ranked by estimated profit, not revenue — a high-volume, thin-margin product
+    # should not crowd out a lower-revenue product that's actually more profitable. A
+    # product with no cost estimate at all can't be ranked by profit, so it's left out
+    # of this list entirely rather than sorted as if its margin were 0.
+    products = [p for p in products if p["estimated_margin"] is not None]
+    products.sort(key=lambda p: p["estimated_margin"], reverse=True)
+
+    # Zero-fill every day in the window, same convention _daily_trend uses — a day
+    # with no sales reads as an actual 0, not a gap. A day with sales but no priced
+    # line at all (no purchase/stock record to cost it against) reports cost/margin
+    # as None ("—" on the frontend) rather than a misleading 0, same rule the
+    # per-product breakdown above already follows.
+    trend = []
+    for current in _each_day(start, end):
+        day_bucket = per_day.get(current, {"net_revenue": 0.0, "estimated_cost": 0.0, "priced_qty": 0.0})
+        if day_bucket["net_revenue"] == 0:
+            day_cost: float | None = 0.0
+            day_margin_pct = None
+        elif day_bucket["priced_qty"] > 0:
+            day_cost = day_bucket["estimated_cost"]
+            day_margin_pct = (day_bucket["net_revenue"] - day_cost) / day_bucket["net_revenue"] * 100
+        else:
+            day_cost = None
+            day_margin_pct = None
+        trend.append(
+            {
+                "date": current.isoformat(),
+                "net_revenue": day_bucket["net_revenue"],
+                "estimated_cost": day_cost,
+                "margin_pct": day_margin_pct,
+            }
+        )
+
+    return (
+        net_revenue_total,
+        cogs_total,
+        priced_net_revenue_total,
+        len(transaction_ids),
+        products if limit is None else products[:limit],
+        trend,
+    )
+
+
+def build_cost_dashboard(
+    db: Session,
+    branch_id: str,
+    branch_name: str,
+    period: PeriodKey,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict:
+    period_range = resolve_period(
+        period, date_from=date_from, date_to=date_to, month=month, comparison="year_ago"
+    )
+    net_revenue, cogs, _priced, transaction_count, products, trend = _cost_totals_and_products(
+        db, branch_id, period_range.start, period_range.end
+    )
+    prev_net_revenue, prev_cogs, _prev_priced, prev_transaction_count, _, _ = _cost_totals_and_products(
+        db, branch_id, period_range.previous_start, period_range.previous_end
+    )
+
+    gross_margin_pct = ((net_revenue - cogs) / net_revenue * 100) if net_revenue else 0.0
+    prev_gross_margin_pct = (
+        (prev_net_revenue - prev_cogs) / prev_net_revenue * 100 if prev_net_revenue else 0.0
+    )
+    margin_per_basket = (net_revenue - cogs) / transaction_count if transaction_count else 0.0
+    prev_margin_per_basket = (
+        (prev_net_revenue - prev_cogs) / prev_transaction_count if prev_transaction_count else 0.0
+    )
+
+    return {
+        "branch_id": branch_id,
+        "branch_name": branch_name,
+        "period": _period_label(period, date_from, date_to),
+        "date_from": period_range.start.isoformat(),
+        "date_to": period_range.end.isoformat(),
+        "estimated_cogs": _kpi(cogs, prev_cogs),
+        "estimated_gross_margin_pct": _kpi(gross_margin_pct, prev_gross_margin_pct),
+        "estimated_margin_per_basket": _kpi(margin_per_basket, prev_margin_per_basket),
+        "profit_breakdown": profit_breakdown(
+            db, [branch_id], {branch_id: branch_name}, period_range.start, period_range.end,
+            net_revenue, cogs, transaction_count,
+            period_range.previous_start, period_range.previous_end,
+            prev_net_revenue, prev_cogs, prev_transaction_count,
+        ),
+        "trend": trend,
+        "products": products,
+    }
+
+
+def build_all_cost_dashboard(
+    db: Session,
+    period: PeriodKey,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict:
+    """Aggregate the Cost tab across every retail branch."""
+    period_range = resolve_period(
+        period, date_from=date_from, date_to=date_to, month=month, comparison="year_ago"
+    )
+    branches = list_retail_branches(db).all()
+    branch_ids = [branch.id for branch in branches]
+    net_revenue = cogs = previous_net_revenue = previous_cogs = 0.0
+    transaction_count = previous_transaction_count = 0
+    trend_by_date: dict[str, dict[str, float]] = {}
+    products_by_key: dict[tuple[str, str], dict[str, float | str]] = {}
+
+    for branch in branches:
+        current = _cost_totals_and_products(
+            db, branch.id, period_range.start, period_range.end, limit=None
+        )
+        previous = _cost_totals_and_products(
+            db, branch.id, period_range.previous_start, period_range.previous_end, limit=None
+        )
+        net_revenue += current[0]
+        cogs += current[1]
+        transaction_count += current[3]
+        previous_net_revenue += previous[0]
+        previous_cogs += previous[1]
+        previous_transaction_count += previous[3]
+
+        for point in current[5]:
+            bucket = trend_by_date.setdefault(
+                point["date"], {"net_revenue": 0.0, "estimated_cost": 0.0, "priced_days": 0.0}
+            )
+            bucket["net_revenue"] += float(point["net_revenue"])
+            if point["estimated_cost"] is not None:
+                bucket["estimated_cost"] += float(point["estimated_cost"])
+                bucket["priced_days"] += 1
+
+        for product in current[4]:
+            key = (product["stock_code"], product["description"])
+            bucket = products_by_key.setdefault(
+                key,
+                {
+                    "stock_code": product["stock_code"],
+                    "description": product["description"],
+                    "qty": 0.0,
+                    "net_revenue": 0.0,
+                    "estimated_cost": 0.0,
+                    "estimated_margin": 0.0,
+                },
+            )
+            bucket["qty"] = float(bucket["qty"]) + float(product["qty"])
+            bucket["net_revenue"] = float(bucket["net_revenue"]) + float(product["net_revenue"])
+            if product["estimated_cost"] is not None:
+                bucket["estimated_cost"] = float(bucket["estimated_cost"]) + float(product["estimated_cost"])
+                bucket["estimated_margin"] = float(bucket["estimated_margin"]) + float(product["estimated_margin"])
+
+    gross_margin_pct = (net_revenue - cogs) / net_revenue * 100 if net_revenue else 0.0
+    previous_gross_margin_pct = (
+        (previous_net_revenue - previous_cogs) / previous_net_revenue * 100
+        if previous_net_revenue
+        else 0.0
+    )
+    margin_per_basket = (net_revenue - cogs) / transaction_count if transaction_count else 0.0
+    previous_margin_per_basket = (
+        (previous_net_revenue - previous_cogs) / previous_transaction_count
+        if previous_transaction_count
+        else 0.0
+    )
+
+    products = [
+        {
+            "stock_code": product["stock_code"],
+            "description": product["description"],
+            "qty": float(product["qty"]),
+            "net_revenue": float(product["net_revenue"]),
+            "estimated_cost": float(product["estimated_cost"]),
+            "estimated_margin": float(product["estimated_margin"]),
+            "margin_pct": (
+                float(product["estimated_margin"]) / float(product["net_revenue"]) * 100
+                if product["net_revenue"]
+                else 0.0
+            ),
+        }
+        for product in products_by_key.values()
+    ]
+    products.sort(key=lambda product: product["estimated_margin"], reverse=True)
+
+    trend = []
+    for day in _each_day(period_range.start, period_range.end):
+        bucket = trend_by_date.get(day.isoformat(), {"net_revenue": 0.0, "estimated_cost": 0.0, "priced_days": 0.0})
+        net = bucket["net_revenue"]
+        cost = bucket["estimated_cost"] if bucket["priced_days"] else None
+        trend.append(
+            {
+                "date": day.isoformat(),
+                "net_revenue": net,
+                "estimated_cost": cost,
+                "margin_pct": (net - cost) / net * 100 if net and cost is not None else None,
+            }
+        )
+
+    return {
+        "branch_id": "",
+        "branch_name": "All Branches",
+        "period": _period_label(period, date_from, date_to),
+        "date_from": period_range.start.isoformat(),
+        "date_to": period_range.end.isoformat(),
+        "estimated_cogs": _kpi(cogs, previous_cogs),
+        "estimated_gross_margin_pct": _kpi(gross_margin_pct, previous_gross_margin_pct),
+        "estimated_margin_per_basket": _kpi(margin_per_basket, previous_margin_per_basket),
+        "profit_breakdown": profit_breakdown(
+            db, branch_ids, {branch.id: branch.name for branch in branches},
+            period_range.start, period_range.end, net_revenue, cogs, transaction_count,
+            period_range.previous_start, period_range.previous_end,
+            previous_net_revenue, previous_cogs, previous_transaction_count,
+        ),
+        "trend": trend,
+        "products": products[:TOP_PRODUCTS_LIMIT],
+    }
+
+
+# --- Inventory ----------------------------------------------------------------------
+
+
+def _latest_stock_levels(
+    db: Session, branch_id: str | None
+) -> list[tuple[StockLevel, Product, Branch | None]]:
+    """`branch_id=None` covers every branch at once — the nullable-branch_id convention
+    GET /api/sales etc. use, and what the standalone Low Stock / Dead Stock pages need
+    for admin's "all branches" view (see compute_stock_health). The dashboard's own
+    caller, _stock_summary, always passes a concrete branch_id — see the module
+    docstring for why that stays true."""
+    return latest_stock_query(db, branch_id).all()
+
+
+def _sales_velocity(
+    db: Session,
+    branch_id: str | None,
+    product_ids: set[str] | None = None,
+    window_days: int = STOCK_VELOCITY_WINDOW_DAYS,
+) -> dict[tuple[str, str | None], float]:
+    """Average daily qty sold per (product, branch) pair over a fixed trailing window —
+    the basis for each product's "days of stock left" estimate below. Keyed by branch
+    too (not just product) so the same stock code in two different branches gets its own
+    velocity rather than one blended figure — this matters once branch_id can be None."""
+    if product_ids is not None and not product_ids:
+        return {}
+    since = date.today() - timedelta(days=window_days - 1)
+    query = (
+        db.query(SaleLine.product_id, Sale.branch_id, func.coalesce(func.sum(SaleLine.qty), 0))
+        .join(Sale, SaleLine.sale_id == Sale.id)
+        .filter(Sale.sale_date >= since)
+    )
+    if branch_id is not None:
+        query = query.filter(Sale.branch_id == branch_id)
+    if product_ids is not None:
+        query = query.filter(SaleLine.product_id.in_(product_ids))
+    rows = query.group_by(SaleLine.product_id, Sale.branch_id).all()
+    return {
+        (product_id, sale_branch_id): float(total) / window_days
+        for product_id, sale_branch_id, total in rows
+    }
+
+
+def _last_sale_dates(
+    db: Session, branch_id: str | None, product_ids: set[str]
+) -> dict[tuple[str, str | None], date]:
+    """Most recent sale_date per (product, branch), with no trailing-window filter —
+    unlike _sales_velocity, dead stock needs to say exactly how long it's been since a
+    sale, not just "not within the last 90 days"."""
+    if not product_ids:
+        return {}
+    query = (
+        db.query(SaleLine.product_id, Sale.branch_id, func.max(Sale.sale_date))
+        .join(Sale, SaleLine.sale_id == Sale.id)
+        .filter(SaleLine.product_id.in_(product_ids))
+    )
+    if branch_id is not None:
+        query = query.filter(Sale.branch_id == branch_id)
+    rows = query.group_by(SaleLine.product_id, Sale.branch_id).all()
+    return {(product_id, sale_branch_id): last_date for product_id, sale_branch_id, last_date in rows}
+
+
+def _stock_status(days_left: float | None) -> str | None:
+    """None means "healthy" (or "no recent sales to estimate from") — either way, not
+    worth a row in the low-stock table. Thresholds are a reasonable default, not a
+    business-configured setting yet — see docs/retail/dashboard.md."""
+    if days_left is None:
+        return None
+    if days_left <= CRITICAL_DAYS_OF_STOCK:
+        return "Critical"
+    if days_left <= LOW_DAYS_OF_STOCK:
+        return "Low"
+    if days_left <= WATCH_DAYS_OF_STOCK:
+        return "Watch"
+    return None
+
+
+def _stock_health_from_rows(
+    rows: list[tuple[StockLevel, Product, Branch | None]],
+    velocity: dict[tuple[str, str | None], float],
+    dead_stock_velocity: dict[tuple[str, str | None], float],
+    last_sale_dates: dict[tuple[str, str | None], date],
+) -> tuple[list[dict], list[dict]]:
+    """The actual low-stock/dead-stock item-building loop, given rows and both velocity
+    windows already fetched — split out from compute_stock_health so _stock_summary can
+    reuse it against rows it already has, rather than querying stock levels twice."""
+    low_stock_items: list[dict] = []
+    dead_stock_items: list[dict] = []
+    today = date.today()
+
+    for stock_level, product, branch in rows:
+        on_hand_qty = float(stock_level.on_hand_qty or 0)
+        key = (product.id, stock_level.branch_id)
+        branch_name = branch.name if branch else None
+
+        daily_velocity = velocity.get(key, 0.0)
+        days_left = on_hand_qty / daily_velocity if daily_velocity > 0 else None
+        status = _stock_status(days_left)
+        if status:
+            # The earlier window's daily rate, backed out of the two velocity figures
+            # already computed above rather than queried again: the 90-day window
+            # contains the 30-day one, so the difference is exactly what sold in the 60
+            # days before it. Clamped at 0 because float subtraction of two averages can
+            # land a hair below zero when nothing sold in that stretch.
+            recent_qty = daily_velocity * STOCK_VELOCITY_WINDOW_DAYS
+            window_qty = dead_stock_velocity.get(key, 0.0) * DEAD_STOCK_WINDOW_DAYS
+            baseline_daily_velocity = max(
+                0.0, (window_qty - recent_qty) / BASELINE_VELOCITY_WINDOW_DAYS
+            )
+            low_stock_items.append(
+                {
+                    "stock_code": product.stock_code,
+                    "description": product.description,
+                    "branch": branch_name,
+                    "on_hand_qty": on_hand_qty,
+                    "days_left": round(days_left, 1),
+                    "status": status,
+                    "daily_velocity": daily_velocity,
+                    "baseline_daily_velocity": baseline_daily_velocity,
+                }
+            )
+
+        # Dead stock: still on the shelf, but hasn't sold at all in DEAD_STOCK_WINDOW_DAYS
+        # — on_hand_qty <= 0 is excluded since there's nothing sitting there to flag.
+        if on_hand_qty > 0 and dead_stock_velocity.get(key, 0.0) == 0.0:
+            last_sold = last_sale_dates.get(key)
+            dead_stock_items.append(
+                {
+                    "stock_code": product.stock_code,
+                    "description": product.description,
+                    "branch": branch_name,
+                    "on_hand_qty": on_hand_qty,
+                    "category": product.group_name or "Uncategorized",
+                    "last_sold_at": last_sold.isoformat() if last_sold else None,
+                    # None means never sold at all (no Sale row ever, not just none
+                    # recently) — worth keeping distinct from a large day count rather
+                    # than collapsing both into one number.
+                    "days_since_last_sale": (today - last_sold).days if last_sold else None,
+                }
+            )
+
+    low_stock_items.sort(key=lambda item: item["days_left"])
+    dead_stock_items.sort(key=lambda item: item["on_hand_qty"], reverse=True)
+    return low_stock_items, dead_stock_items
+
+
+def compute_stock_health(db: Session, branch_id: str | None) -> tuple[list[dict], list[dict]]:
+    """Every low-stock and dead-stock item, uncapped (unlike the Inventory tab's own
+    LOW_STOCK_ITEMS_LIMIT/DEAD_STOCK_ITEMS_LIMIT slice) — the shared computation behind
+    both that dashboard tab and the standalone Low Stock / Dead Stock pages
+    (GET /api/inventory/low-stock, /dead-stock), which page through the rest. One
+    function so the two views can never disagree on which products are flagged — see
+    _stock_summary's docstring for why that consistency matters for the branch health
+    score too.
+
+    `branch_id=None` covers every branch at once, for admin's "all branches" list view
+    — see the module docstring for why this is the one exception to "always one branch."
+    """
+    rows = _latest_stock_levels(db, branch_id)
+    product_ids = {product.id for _, product, _ in rows}
+    velocity = _sales_velocity(db, branch_id, product_ids)
+    # A second, longer-window velocity check purely to decide "has this sold at all
+    # recently" for dead stock — see DEAD_STOCK_WINDOW_DAYS.
+    dead_stock_velocity = _sales_velocity(db, branch_id, product_ids, window_days=DEAD_STOCK_WINDOW_DAYS)
+    last_sale_dates = _last_sale_dates(db, branch_id, product_ids)
+    return _stock_health_from_rows(rows, velocity, dead_stock_velocity, last_sale_dates)
+
+
+def _stock_summary(db: Session, branch_id: str | None) -> dict:
+    """Everything the Inventory tab reports about current stock, minus the
+    data-quality warnings — split out so the branch health score (see
+    app/retail/services/branch_health.py) can read the exact same SKU/dead-stock/low-stock
+    figures the tab shows without also paying for a second warnings pass over a
+    window it doesn't want. If Overview and the Inventory tab ever disagreed on the
+    dead-stock count the whole score would lose its credibility, so there is
+    deliberately only one place that counts it. A None branch_id intentionally
+    produces the all-branches rollup.
+    """
+    rows = _latest_stock_levels(db, branch_id)
+    product_ids = {product.id for _, product, _ in rows}
+    velocity = _sales_velocity(db, branch_id, product_ids)
+    dead_stock_velocity = _sales_velocity(db, branch_id, product_ids, window_days=DEAD_STOCK_WINDOW_DAYS)
+    last_sale_dates = _last_sale_dates(db, branch_id, product_ids)
+    low_stock_items, dead_stock_items = _stock_health_from_rows(
+        rows, velocity, dead_stock_velocity, last_sale_dates
+    )
+
+    estimated_stock_value = 0.0
+    potential_sale_value = 0.0
+    qty_by_category: dict[str, float] = {}
+    status_counts = {"Critical": 0, "Low": 0, "Watch": 0}
+    latest_snapshot_at = None
+
+    for stock_level, product, _branch in rows:
+        on_hand_qty = float(stock_level.on_hand_qty or 0)
+        buying_price = float(stock_level.buying_price) if stock_level.buying_price is not None else None
+        value = on_hand_qty * buying_price if buying_price is not None else 0.0
+        estimated_stock_value += value
+        # What the shelf would bring in if all of it sold at its listed price. A product
+        # with no selling price on its latest snapshot adds nothing rather than a guess.
+        selling_price = float(stock_level.selling_price) if stock_level.selling_price is not None else None
+        if selling_price is not None:
+            potential_sale_value += on_hand_qty * selling_price
+        category = product.group_name or "Uncategorized"
+        # Quantity, not value, for the per-category breakdown — it comes straight from
+        # the inventory import every time, unlike value, which silently reads as 0 for
+        # any product missing a buying_price on its latest snapshot (see
+        # estimated_stock_value above) and would otherwise make a category look
+        # artificially small.
+        qty_by_category[category] = qty_by_category.get(category, 0.0) + on_hand_qty
+
+        if latest_snapshot_at is None or stock_level.snapshot_at > latest_snapshot_at:
+            latest_snapshot_at = stock_level.snapshot_at
+
+    for item in low_stock_items:
+        status_counts[item["status"]] += 1
+
+    stock_qty_by_category = sorted(
+        ({"category": category, "qty": qty} for category, qty in qty_by_category.items()),
+        key=lambda row: row["qty"],
+        reverse=True,
+    )
+
+    # branch is only meaningful for the standalone all-branches list pages — every item
+    # here is already scoped to this one dashboard's branch_id, so it's dropped rather
+    # than sent to the frontend redundantly on every row.
+    def _drop_branch(item: dict) -> dict:
+        return {k: v for k, v in item.items() if k != "branch"}
+
+    return {
+        "as_of": latest_snapshot_at.isoformat() if latest_snapshot_at else None,
+        "sku_count": len(rows),
+        "critical_count": status_counts["Critical"],
+        "low_count": status_counts["Low"],
+        "watch_count": status_counts["Watch"],
+        "estimated_stock_value": estimated_stock_value,
+        "potential_sale_value": potential_sale_value,
+        "dead_stock_count": len(dead_stock_items),
+        "stock_qty_by_category": stock_qty_by_category,
+        "low_stock_items": [_drop_branch(item) for item in low_stock_items[:LOW_STOCK_ITEMS_LIMIT]],
+        "dead_stock_items": [_drop_branch(item) for item in dead_stock_items[:DEAD_STOCK_ITEMS_LIMIT]],
+    }
+
+
+def build_inventory_dashboard(db: Session, branch_id: str, branch_name: str) -> dict:
+    summary = _stock_summary(db, branch_id)
+
+    return {
+        "branch_id": branch_id,
+        "branch_name": branch_name,
+        **summary,
+    }
+
+
+def build_all_inventory_dashboard(db: Session) -> dict:
+    """Aggregate current inventory, low stock, and dead stock across all branches."""
+    return {
+        "branch_id": "",
+        "branch_name": "All Branches",
+        **_stock_summary(db, None),
+    }
+
+
+# --- Customer -------------------------------------------------------------------------
+
+
+def _basket_stats(
+    db: Session, branch_id: str, start: date, end: date
+) -> tuple[float, float, int, dict[int, int]]:
+    """Basket shape (not money) for the period: avg line-items per basket, the % of
+    baskets with exactly one line item, the transaction count, and a line-item-count
+    histogram (buckets 1-5, 6 meaning "6+")."""
+    rows = (
+        db.query(Sale.id, func.count(SaleLine.id))
+        .join(SaleLine, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .group_by(Sale.id)
+        .all()
+    )
+    line_counts = [count for _, count in rows]
+    transaction_count = len(line_counts)
+    avg_items_per_basket = sum(line_counts) / transaction_count if transaction_count else 0.0
+    single_item_count = sum(1 for count in line_counts if count == 1)
+    single_item_share_pct = (
+        single_item_count / transaction_count * 100 if transaction_count else 0.0
+    )
+    histogram: dict[int, int] = {}
+    for count in line_counts:
+        bucket = count if count < 6 else 6
+        histogram[bucket] = histogram.get(bucket, 0) + 1
+    return avg_items_per_basket, single_item_share_pct, transaction_count, histogram
+
+
+def _conversion_stats(
+    db: Session, branch_id: str, start: date, end: date
+) -> tuple[float | None, int, int, int]:
+    """Conversion rate across days with zero-selling records in this period:
+    sales_slips ÷ (sales_slips + zero_selling_records) * 100.
+
+    Only days with zero-selling records are counted. Returns (None, 0, 0, 0)
+    if no zero-selling records exist in the period.
+    """
+    zero_days = (
+        db.query(
+            ZeroSellingRecord.sale_date,
+            func.count(ZeroSellingRecord.id).label("zero_count"),
+        )
+        .filter(
+            ZeroSellingRecord.branch_id == branch_id,
+            ZeroSellingRecord.sale_date >= start,
+            ZeroSellingRecord.sale_date <= end,
+        )
+        .group_by(ZeroSellingRecord.sale_date)
+        .all()
+    )
+    if not zero_days:
+        return None, 0, 0, 0
+
+    dates_with_records = [d for d, _ in zero_days]
+    total_zero = sum(int(c) for _, c in zero_days)
+
+    sales_count = (
+        db.query(func.count(Sale.id))
+        .filter(
+            Sale.branch_id == branch_id,
+            Sale.sale_date.in_(dates_with_records),
+        )
+        .scalar()
+        or 0
+    )
+    sales_count = int(sales_count)
+    denominator = sales_count + total_zero
+    if denominator == 0:
+        return None, 0, 0, len(dates_with_records)
+
+    conversion_rate = (sales_count / denominator) * 100.0
+    return conversion_rate, sales_count, total_zero, len(dates_with_records)
+
+
+def _footfall_heatmap(db: Session, branch_id: str, start: date, end: date) -> list[dict]:
+    """The same weekday × hour-band grid as Revenue's heatmap, bucketed by transaction
+    count instead of revenue — a busy-but-low-ticket hour and a quiet-but-high-ticket
+    one can diverge, so this is queried directly from Sale rather than derived from the
+    revenue heatmap."""
+    rows = (
+        db.query(Sale.sale_date, Sale.sale_time)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .all()
+    )
+    return _bucket_heatmap(
+        ((sale_date, sale_time, 1) for sale_date, sale_time in rows),
+        "transaction_count",
+    )
+
+
+def _transaction_count_trend(db: Session, branch_id: str, start: date, end: date) -> list[dict]:
+    """Daily transaction (basket) count over the period — the day-by-day footfall trend
+    that complements the weekday x hour Busy Hours heatmap, which shows the recurring
+    pattern but not how the whole period actually moved day to day."""
+    rows = (
+        db.query(Sale.sale_date, func.count(func.distinct(Sale.id)))
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .group_by(Sale.sale_date)
+        .all()
+    )
+    by_date = {sale_date: int(count) for sale_date, count in rows}
+    return [
+        {"date": day.isoformat(), "transaction_count": by_date.get(day, 0)}
+        for day in _each_day(start, end)
+    ]
+
+
+def build_customer_dashboard(
+    db: Session,
+    branch_id: str,
+    branch_name: str,
+    period: PeriodKey,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict:
+    period_range = resolve_period(
+        period, date_from=date_from, date_to=date_to, month=month, comparison="year_ago"
+    )
+    _, _, transaction_count, histogram = _basket_stats(
+        db, branch_id, period_range.start, period_range.end
+    )
+    _, _, prev_transaction_count, _ = _basket_stats(
+        db, branch_id, period_range.previous_start, period_range.previous_end
+    )
+
+    footfall = _footfall_heatmap(db, branch_id, period_range.start, period_range.end)
+    # No vs-previous-period delta for this one — it names a bucket (a day/time), not a
+    # number that moves, so "up/down vs last period" wouldn't mean anything.
+    busiest_hour = max(footfall, key=lambda cell: cell["transaction_count"], default=None)
+
+    conversion_rate, _, _, _ = _conversion_stats(
+        db, branch_id, period_range.start, period_range.end
+    )
+    prev_conversion_rate, _, _, _ = _conversion_stats(
+        db, branch_id, period_range.previous_start, period_range.previous_end
+    )
+
+    return {
+        "branch_id": branch_id,
+        "branch_name": branch_name,
+        "period": _period_label(period, date_from, date_to),
+        "date_from": period_range.start.isoformat(),
+        "date_to": period_range.end.isoformat(),
+        "total_transactions": _kpi(float(transaction_count), float(prev_transaction_count)),
+        "conversion_rate": _optional_kpi(conversion_rate, prev_conversion_rate),
+        "busiest_hour": busiest_hour,
+        "footfall_heatmap": footfall,
+        "transaction_count_trend": _transaction_count_trend(db, branch_id, period_range.start, period_range.end),
+        "items_per_basket_histogram": [
+            {"items": items, "count": count} for items, count in sorted(histogram.items())
+        ],
+    }
+
+
+def build_all_customer_dashboard(
+    db: Session,
+    period: PeriodKey,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict:
+    """Aggregate the Customer tab across every retail branch."""
+    period_range = resolve_period(
+        period, date_from=date_from, date_to=date_to, month=month, comparison="year_ago"
+    )
+    branches = list_retail_branches(db).all()
+    transaction_count = previous_transaction_count = 0
+    sales_count = previous_sales_count = 0
+    zero_count = previous_zero_count = 0
+    trend_by_date: dict[str, int] = {}
+    heatmap_by_key: dict[tuple[int, str], int] = {}
+    histogram: dict[int, int] = {}
+
+    for branch in branches:
+        _, _, current_transactions, current_histogram = _basket_stats(
+            db, branch.id, period_range.start, period_range.end
+        )
+        _, _, previous_transactions, _ = _basket_stats(
+            db, branch.id, period_range.previous_start, period_range.previous_end
+        )
+        _, current_sales, current_zero, _ = _conversion_stats(
+            db, branch.id, period_range.start, period_range.end
+        )
+        _, previous_sales, previous_zero, _ = _conversion_stats(
+            db, branch.id, period_range.previous_start, period_range.previous_end
+        )
+        transaction_count += current_transactions
+        previous_transaction_count += previous_transactions
+        sales_count += current_sales
+        previous_sales_count += previous_sales
+        zero_count += current_zero
+        previous_zero_count += previous_zero
+
+        for items, count in current_histogram.items():
+            histogram[items] = histogram.get(items, 0) + count
+        for point in _transaction_count_trend(
+            db, branch.id, period_range.start, period_range.end
+        ):
+            trend_by_date[point["date"]] = trend_by_date.get(point["date"], 0) + point["transaction_count"]
+        for cell in _footfall_heatmap(db, branch.id, period_range.start, period_range.end):
+            key = (cell["weekday"], cell["hour_band"])
+            heatmap_by_key[key] = heatmap_by_key.get(key, 0) + cell["transaction_count"]
+
+    conversion_rate = (
+        sales_count / (sales_count + zero_count) * 100
+        if sales_count + zero_count
+        else None
+    )
+    previous_conversion_rate = (
+        previous_sales_count / (previous_sales_count + previous_zero_count) * 100
+        if previous_sales_count + previous_zero_count
+        else None
+    )
+    heatmap = [
+        {"weekday": weekday, "hour_band": hour_band, "transaction_count": count}
+        for (weekday, hour_band), count in sorted(heatmap_by_key.items())
+    ]
+    busiest_hour = max(heatmap, key=lambda cell: cell["transaction_count"], default=None)
+
+    return {
+        "branch_id": "",
+        "branch_name": "All Branches",
+        "period": _period_label(period, date_from, date_to),
+        "date_from": period_range.start.isoformat(),
+        "date_to": period_range.end.isoformat(),
+        "total_transactions": _kpi(float(transaction_count), float(previous_transaction_count)),
+        "conversion_rate": _optional_kpi(conversion_rate, previous_conversion_rate),
+        "busiest_hour": busiest_hour,
+        "footfall_heatmap": heatmap,
+        "transaction_count_trend": [
+            {"date": day.isoformat(), "transaction_count": trend_by_date.get(day.isoformat(), 0)}
+            for day in _each_day(period_range.start, period_range.end)
+        ],
+        "items_per_basket_histogram": [
+            {"items": items, "count": count} for items, count in sorted(histogram.items())
+        ],
+    }
+
+
+# --- Summary --------------------------------------------------------------------------
+
+
+def _category_revenue(
+    db: Session, branch_id: str, start: date, end: date
+) -> tuple[list[dict], float]:
+    """Aggregate net sales revenue grouped by product category (Product.group_name)."""
+    cat_rows = (
+        db.query(
+            func.coalesce(Product.group_name, "Uncategorized"),
+            func.coalesce(func.sum(SaleLine.net_amount), 0),
+        )
+        .join(SaleLine, SaleLine.product_id == Product.id)
+        .join(Sale, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .group_by(Product.group_name)
+        .order_by(func.sum(SaleLine.net_amount).desc())
+        .all()
+    )
+    total_rev = sum(float(amount) for _, amount in cat_rows)
+    items = [
+        {
+            "category": str(cat),
+            "net_revenue": float(amount),
+            "share_pct": (float(amount) / total_rev * 100) if total_rev > 0 else 0.0,
+        }
+        for cat, amount in cat_rows
+    ]
+    return items, total_rev
+
+
+def _hourly_demand(
+    db: Session, branch_id: str, start: date, end: date
+) -> tuple[list[dict], str, str, str]:
+    """Hourly sales demand distribution and its single busiest hour."""
+    sales = (
+        db.query(Sale.sale_time, func.coalesce(func.sum(SaleLine.net_amount), 0))
+        .join(SaleLine, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= start, Sale.sale_date <= end)
+        .group_by(Sale.id, Sale.sale_time)
+        .all()
+    )
+    hourly_counts: dict[int, int] = {}
+    hourly_revenue: dict[int, float] = {}
+    for sale_time, amount in sales:
+        hr = _parse_hour(sale_time)
+        if hr is not None:
+            hourly_counts[hr] = hourly_counts.get(hr, 0) + 1
+            hourly_revenue[hr] = hourly_revenue.get(hr, 0.0) + float(amount or 0)
+
+    all_hours = sorted(hourly_counts.keys())
+    if all_hours:
+        min_hr = min(8, min(all_hours))
+        max_hr = max(20, max(all_hours))
+        display_hours = list(range(min_hr, max_hr + 1))
+    else:
+        display_hours = list(range(8, 21))
+
+    hourly_demand_list = [
+        {
+            "hour": f"{hr:02d}",
+            "count": hourly_counts.get(hr, 0),
+            "net_revenue": hourly_revenue.get(hr, 0.0),
+        }
+        for hr in display_hours
+    ]
+
+    if hourly_counts:
+        # The one busiest hour — the same hour the bars above show tallest. Sorted first
+        # so two hours tied on transactions resolve to the earlier one.
+        peak_hr = max(sorted(hourly_counts), key=lambda h: hourly_counts[h])
+        peak_count = hourly_counts[peak_hr]
+        peak_period = f"{peak_hr:02d}:00 - {(peak_hr + 1) % 24:02d}:00"
+        peak_hour_desc = f"{peak_count:,} transaction{'' if peak_count == 1 else 's'}"
+        if peak_hr >= 17:
+            demand_summary = "Strongest demand occurs in the evening"
+        elif peak_hr >= 12:
+            demand_summary = "Strongest demand occurs in the afternoon"
+        else:
+            demand_summary = "Strongest demand occurs in the morning"
+    else:
+        # Nothing sold, so there is no peak to name — not an invented "16:00-20:00".
+        peak_period = "—"
+        peak_hour_desc = "No transactions in this period"
+        demand_summary = "No sales in this period"
+
+    return hourly_demand_list, peak_period, peak_hour_desc, demand_summary
+
+
+def build_summary_dashboard(
+    db: Session,
+    branch_id: str,
+    branch_name: str,
+    period: PeriodKey,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict:
+    period_range = resolve_period(period, date_from=date_from, date_to=date_to, month=month)
+    net_revenue, transaction_count = _revenue_totals(
+        db, branch_id, period_range.start, period_range.end
+    )
+    _, cogs, _, _, _, _ = _cost_totals_and_products(
+        db, branch_id, period_range.start, period_range.end
+    )
+
+    gross_profit = net_revenue - cogs
+    profit_margin_pct = (gross_profit / net_revenue * 100) if net_revenue > 0 else 0.0
+    avg_sale = net_revenue / transaction_count if transaction_count else 0.0
+
+    qty_sold_row = (
+        db.query(
+            func.coalesce(func.sum(SaleLine.qty), 0),
+            func.count(func.distinct(SaleLine.product_id)),
+        )
+        .join(Sale, SaleLine.sale_id == Sale.id)
+        .filter(Sale.branch_id == branch_id, Sale.sale_date >= period_range.start, Sale.sale_date <= period_range.end)
+        .one()
+    )
+    quantity_sold = float(qty_sold_row[0])
+    selling_sku_count = int(qty_sold_row[1])
+
+    stock_summary = _stock_summary(db, branch_id)
+    as_of = stock_summary["as_of"]
+    total_products = stock_summary["sku_count"]
+    dead_stock_count = stock_summary["dead_stock_count"]
+    active_stock_count = max(0, total_products - dead_stock_count)
+    dead_stock_pct = (dead_stock_count / total_products * 100) if total_products > 0 else 0.0
+
+    category_revenue, _ = _category_revenue(db, branch_id, period_range.start, period_range.end)
+    hourly_demand_list, peak_period, peak_hour_desc, demand_summary = _hourly_demand(
+        db, branch_id, period_range.start, period_range.end
+    )
+    footfall_heatmap = _footfall_heatmap(db, branch_id, period_range.start, period_range.end)
+    busiest_hour = max(footfall_heatmap, key=lambda cell: cell["transaction_count"], default=None)
+    top_products = _top_products(db, branch_id, period_range.start, period_range.end, limit=5)
+
+    risk_alert = (
+        "Main risk: more than half of current products are not generating sales."
+        if dead_stock_pct >= 50
+        else (
+            f"Risk: {dead_stock_pct:.1f}% of current products are not generating sales."
+            if dead_stock_pct > 20
+            else "Healthy inventory movement with low dead stock."
+        )
+    )
+
+    return {
+        "branch_id": branch_id,
+        "branch_name": branch_name,
+        "period": _period_label(period, date_from, date_to),
+        "date_from": period_range.start.isoformat(),
+        "date_to": period_range.end.isoformat(),
+        "as_of": as_of,
+        "kpis": {
+            "net_revenue": net_revenue,
+            "gross_profit": gross_profit,
+            "profit_margin_pct": profit_margin_pct,
+            "transaction_count": transaction_count,
+            "avg_sale": avg_sale,
+            "quantity_sold": quantity_sold,
+            "selling_sku_count": selling_sku_count,
+            "dead_stock_count": dead_stock_count,
+            "active_stock_count": active_stock_count,
+            "total_products_count": total_products,
+            "dead_stock_pct": dead_stock_pct,
+        },
+        "category_revenue": category_revenue,
+        "inventory_condition": {
+            "dead_stock_count": dead_stock_count,
+            "active_stock_count": active_stock_count,
+            "total_products_count": total_products,
+            "dead_stock_pct": dead_stock_pct,
+            "risk_alert": risk_alert,
+        },
+        "customer_demand": {
+            "summary": demand_summary,
+            "peak_period": peak_period,
+            "peak_hour_desc": peak_hour_desc,
+            "busiest_hour": busiest_hour,
+            "hourly": hourly_demand_list,
+            "footfall_heatmap": footfall_heatmap,
+        },
+        "top_products": top_products,
+    }
+
+
+def build_all_summary_dashboard(
+    db: Session,
+    period: PeriodKey,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict:
+    """Build the executive summary across every retail branch.
+
+    The branch rows intentionally reuse the same revenue, cost, stock and pricing
+    helpers as the branch dashboard. This keeps the all-branches screen a rollup of
+    the numbers users see after opening a branch, rather than a second definition of
+    sales or profit.
+    """
+    period_range = resolve_period(
+        period, date_from=date_from, date_to=date_to, month=month, comparison="year_ago"
+    )
+    branches = list_retail_branches(db).all()
+    branch_rows: list[dict] = []
+    monthly_by_branch: list[dict] = []
+
+    total_revenue = 0.0
+    total_profit = 0.0
+    total_transactions = 0
+    total_quantity = 0.0
+    total_dead_stock = 0
+    total_products = 0
+    latest_as_of: str | None = None
+
+    for branch in branches:
+        current_revenue, transactions = _revenue_totals(
+            db, branch.id, period_range.start, period_range.end
+        )
+        previous_revenue, _ = _revenue_totals(
+            db, branch.id, period_range.previous_start, period_range.previous_end
+        )
+        _, cogs, _, _, _, _ = _cost_totals_and_products(
+            db, branch.id, period_range.start, period_range.end
+        )
+        quantity = _quantity_sold(db, branch.id, period_range.start, period_range.end)
+        previous_growth = (
+            (current_revenue - previous_revenue) / previous_revenue * 100
+            if previous_revenue
+            else None
+        )
+        profit = current_revenue - cogs
+        margin = profit / current_revenue * 100 if current_revenue else 0.0
+        stock = _stock_summary(db, branch.id)
+        inventory_value = float(stock["estimated_stock_value"] or 0)
+        stock_as_of = stock["as_of"]
+        if stock_as_of and (latest_as_of is None or stock_as_of > latest_as_of):
+            latest_as_of = stock_as_of
+
+        branch_rows.append(
+            {
+                "branch_id": branch.id,
+                "branch_name": branch.name,
+                "sales": current_revenue,
+                "growth_pct": previous_growth,
+                "profit": profit,
+                "margin_pct": margin,
+                "pairs_sold": quantity,
+                "avg_transaction": current_revenue / transactions if transactions else 0.0,
+                "inventory_value": inventory_value,
+            }
+        )
+
+        monthly = _monthly_sales_totals(
+            db, branch.id, period_range.start, period_range.end
+        )
+        monthly_by_branch.append(
+            {
+                "branch_id": branch.id,
+                "branch_name": branch.name,
+                "monthly": [monthly[month]["revenue"] for month in range(1, 13)],
+            }
+        )
+
+        total_revenue += current_revenue
+        total_profit += profit
+        total_transactions += transactions
+        total_quantity += quantity
+        total_dead_stock += int(stock["dead_stock_count"])
+        total_products += int(stock["sku_count"])
+
+    total_margin = total_profit / total_revenue * 100 if total_revenue else 0.0
+    dead_stock_pct = total_dead_stock / total_products * 100 if total_products else 0.0
+
+    return {
+        "branch_name": "All Branches",
+        "period": _period_label(period, date_from, date_to),
+        "date_from": period_range.start.isoformat(),
+        "date_to": period_range.end.isoformat(),
+        "as_of": latest_as_of,
+        "kpis": {
+            "net_revenue": total_revenue,
+            "gross_profit": total_profit,
+            "profit_margin_pct": total_margin,
+            "transaction_count": total_transactions,
+            "quantity_sold": total_quantity,
+            "dead_stock_count": total_dead_stock,
+            "total_products_count": total_products,
+            "dead_stock_pct": dead_stock_pct,
+        },
+        "branches": branch_rows,
+        "monthly_trend": monthly_by_branch,
+    }

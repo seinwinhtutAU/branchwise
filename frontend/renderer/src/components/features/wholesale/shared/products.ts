@@ -1,0 +1,39 @@
+// What the business actually sells, beyond the code on the box. A stock code alone —
+// "A1001" — tells nobody which shoe is meant, so every product carries a description and
+// the product_group it belongs to: man, lady or child. The product_group is how the business thinks about
+// its range, and it is the difference between "we are short of B2001" and "we are short of
+// ladies' sandals".
+//
+// Orders, vouchers, receivings and stock all keep the description and product_group on the line
+// itself rather than looking them up, so a line still reads properly when a product is
+// renamed later. This list is what the wizards offer while someone is typing, so the same
+// product is not written three different ways on three screens.
+//
+// Product master data is hydrated from the backend by masterData.ts.
+
+import { type Unit, type UnitConversions } from "./units";
+
+export type ProductGroup = "man" | "lady" | "child" | "other";
+
+export const PRODUCT_GROUPS: ProductGroup[] = ["man", "lady", "child", "other"];
+
+export const GROUP_LABELS: Record<ProductGroup, string> = {
+  man: "Man",
+  lady: "Lady",
+  child: "Child",
+  other: "Other",
+};
+
+export interface Product {
+  stock_code: string;
+  description: string;
+  product_group: ProductGroup;
+  default_unit: Unit;
+  /** The rate to copy into a new transaction line. Existing lines keep their own copy. */
+  default_unit_conversions?: UnitConversions;
+  /** Suggested prices only, in Kyat — pre-fill a new order/voucher line and nothing
+   *  more. A line always keeps its own price once created, since what a factory
+   *  actually charges or a customer actually pays varies deal to deal. */
+  default_selling_price?: number;
+  default_buying_price?: number;
+}

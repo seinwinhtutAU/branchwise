@@ -1,0 +1,386 @@
+import csv
+import functools
+import io
+import re
+import uuid
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pyidaungsu as pds
+from sqlalchemy import case, or_, update
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
+
+from app.retail.models.import_batch import ImportBatch, ImportType
+from app.retail.models.product import Product
+
+SUPPORTED_EXTENSIONS = {".csv", ".xls", ".xlsx"}
+
+_MYANMAR_RANGE = re.compile(r"[က-႟]")
+_MAX_ZAWGYI_NORMALIZATION_PASSES = 3
+
+
+def parse_number(value: str) -> float | None:
+    value = value.strip().replace(",", "")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def is_zawgyi(text: str) -> bool:
+    """Classify Myanmar text as Zawgyi vs. standard Unicode.
+
+    pyidaungsu bundles a fasttext classifier for this, but its public
+    detect()/predict() wrapper crashes under numpy>=2 (`np.array(x,
+    copy=False)` raises ValueError). Call the underlying pybind model
+    directly to bypass that broken wrapper.
+    """
+    try:
+        predictions = pds.f.f.predict(text, 1, 0.0, "strict")
+        if predictions and predictions[0]:
+            return predictions[0][1] == "__label__zg"
+        return False
+    except Exception:
+        return False
+
+
+@functools.lru_cache(maxsize=50_000)
+def clean_text(value: str) -> str:
+    """Collapse whitespace and normalize Zawgyi-encoded Myanmar text to Unicode.
+
+    POS exports from Myanmar retail software commonly mix standard Unicode
+    Myanmar text with legacy Zawgyi encoding (a non-Unicode-compliant font
+    hack that was near universal before Myanmar's 2019 switch to Unicode).
+    Chromium/Electron only render standard Unicode Myanmar correctly, so
+    Zawgyi text displays garbled unless converted — but converting text
+    that's already proper Unicode corrupts it, so only convert when the
+    text is actually detected as Zawgyi.
+
+    Cached because is_zawgyi() runs a fasttext model inference per call, and
+    the same Description/Location strings repeat across many rows of a
+    single import (e.g. Location is often identical on every row) — without
+    memoizing, a large file re-runs the model on identical text hundreds of
+    times. The result is a pure function of the input text, so caching is
+    safe; capped well above any realistic number of distinct strings seen
+    across the process's lifetime so it can't grow unbounded.
+    """
+    text = " ".join(value.split())
+    # A cell can contain more than one legacy fragment mixed with already-correct
+    # Unicode. Re-check after a conversion so those fragments can settle too, while
+    # never converting a string the detector has accepted as Unicode. The hard cap
+    # also protects an import from a faulty/non-converging third-party conversion.
+    if _MYANMAR_RANGE.search(text):
+        for _ in range(_MAX_ZAWGYI_NORMALIZATION_PASSES):
+            if not is_zawgyi(text):
+                break
+            converted = pds.cvt2uni(text)
+            if converted == text:
+                break
+            text = converted
+    return text
+
+
+def title_case(text: str) -> str:
+    """Product names as a person would write them: "golden duck" -> "Golden Duck".
+
+    POS operators type descriptions however they please, so the same shelf ends up with
+    "lily", "Lily", "NIKE", "adidas" and "CLassic" side by side, and every screen in the
+    app shows that inconsistency back to the reader. One capital letter per word is what
+    the business asked for, so that is exactly the rule: first letter up, the rest down.
+
+    Two things are deliberately left alone. Myanmar text has no upper and lower case at
+    all, so it passes through untouched by definition. Words containing a digit are
+    skipped too ("3D", "500ML"), since those read as codes or sizes rather than words and
+    lowercasing them ("3d", "500Ml") looks like a mistake.
+
+    The cost is a handful of run-together brand names — "AandFicth" becomes "Aandficth" —
+    because nothing in the text says where one word ends and the next begins. That is the
+    trade for fixing the far more common "NIKE"/"adidas"/"CLassic" case, and it is only
+    the display label: `stock_code` remains the key that identifies a product.
+    """
+    return " ".join(
+        word if any(character.isdigit() for character in word) else word.capitalize()
+        for word in text.split()
+    )
+
+
+def clean_description(value: str) -> str:
+    """`clean_text` plus the title-casing above — what every import runs a product
+    description through, so a name is stored the same way whichever file it arrived in."""
+    return title_case(clean_text(value))
+
+
+def read_raw_grid(file_bytes: bytes, filename: str) -> list[list[str]]:
+    """Read a raw POS export (csv/xls/xlsx) into a grid of string cells, unmodified.
+
+    For Excel workbooks with multiple sheets (common when reports exceed row limits),
+    all sheets are read and concatenated in sheet order.
+    """
+    ext = Path(filename).suffix.lower()
+
+    if ext == ".csv":
+        text = file_bytes.decode("utf-8-sig")
+        return [row for row in csv.reader(io.StringIO(text, newline=""))]
+
+    if ext in (".xls", ".xlsx"):
+        sheets_dict = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, header=None, dtype=str)
+        all_rows: list[list[str]] = []
+        for df in sheets_dict.values():
+            if not df.empty:
+                all_rows.extend(df.fillna("").astype(str).values.tolist())
+        return all_rows
+
+    raise ValueError(f"Unsupported file type: {ext or 'unknown'}")
+
+
+# Each report type's column-header row starts with a distinct label, e.g. a
+# sale export's header is "Other Code,Stock Code,Description,...", inventory's
+# is "Stk. Code,Other Code,...", and purchase's (which has no metadata line
+# before it) is "Stock Code,Description,...". Checked against the first few
+# rows of the raw grid, this tells a sale file apart from an inventory or
+# purchase file structurally, without needing the row to parse cleanly.
+_REPORT_TYPE_SIGNATURES: dict[str, str] = {
+    "Other Code": "sale",
+    "Stk. Code": "inventory",
+    "Stock Code": "purchase",
+    "Stock Listing Report": "inventory",
+}
+
+
+def detect_report_type(rows: list[list[str]]) -> str | None:
+    """Best-effort guess of which POS export type a raw grid is, from its
+    column-header row's first cell or header markers. Returns None when nothing
+    in the first few rows matches a known header, so unfamiliar files aren't blocked.
+    """
+    for row in rows[:15]:
+        if not row:
+            continue
+        for cell in row:
+            val = cell.strip()
+            if not val:
+                continue
+            if val in _REPORT_TYPE_SIGNATURES:
+                return _REPORT_TYPE_SIGNATURES[val]
+            if "Stock Listing Report" in val:
+                return "inventory"
+    return None
+
+
+NumericRule = tuple[str, float | None]
+
+# Plain-English names for the columns validation can flag, since these
+# messages are read by shop staff, not developers.
+_FRIENDLY_LABELS: dict[str, str] = {
+    "Qty": "Quantity",
+    "Quantity": "Quantity",
+    "Selling_Price": "Selling Price",
+    "Buying_Price": "Buying Price",
+    "On_Hand_Qty": "Stock Quantity",
+    "Discount_Amount": "Discount Amount",
+    "Amount": "Amount",
+    "Net_Amount": "Net Amount",
+}
+
+
+def _friendly_label(column: str) -> str:
+    return _FRIENDLY_LABELS.get(column, column.replace("_", " "))
+
+
+def _describe_failure(column: str, minimum: float | None, *, unparseable: bool) -> str:
+    label = _friendly_label(column)
+    if unparseable:
+        return f"{label} doesn't look like a valid number"
+    if minimum == 0:
+        return f"{label} can't be a negative number"
+    if minimum == 1:
+        return f"{label} can't be zero — enter at least 1"
+    return f"{label} must be at least {minimum:g}"
+
+
+def validate_rows(df: pd.DataFrame, rules: list[NumericRule]) -> list[list[dict]]:
+    """Check each row against a list of (column, minimum) numeric rules.
+
+    A column fails if its value isn't a real number (already None/NaN from
+    parse_number during cleaning), or — when a minimum is given — is below
+    it. `minimum=None` means "just must be a real number," no threshold.
+
+    Returns one list of issues per row, in row order; an empty list means
+    the row passed everything. Each issue is `{"column": ..., "message":
+    ...}` — `column` for matching the cell to highlight, `message` a
+    plain-English explanation for non-technical users (e.g. "Quantity
+    can't be zero — enter at least 1"), not just the raw column name.
+    """
+    issues: list[list[dict]] = []
+    # Plain dicts rather than df.iterrows() — iterrows materializes a Series per
+    # row, which is several times slower across the thousands of rows a Warning
+    # page load or import preview can push through here.
+    for row in df.to_dict(orient="records"):
+        failed: list[dict] = []
+        for column, minimum in rules:
+            value = row.get(column)
+            unparseable = value is None or pd.isna(value)
+            if unparseable or (minimum is not None and value < minimum):
+                failed.append(
+                    {
+                        "column": column,
+                        "message": _describe_failure(column, minimum, unparseable=unparseable),
+                    }
+                )
+        issues.append(failed)
+    return issues
+
+
+def sql_rule_failure(columns: dict[str, Any], rules: list[NumericRule]):
+    """The SQL twin of `validate_rows`: true when any rule's column is NULL or below its
+    minimum. Lets a count-only check (the Branch Health alerts) apply exactly the same
+    rules as the Warning page's row-level check, so the two can never disagree about
+    which lines are bad. `columns` maps each rule's column name to its model column."""
+    return or_(
+        *(
+            or_(columns[name].is_(None), columns[name] < minimum)
+            if minimum is not None
+            else columns[name].is_(None)
+            for name, minimum in rules
+        )
+    )
+
+
+def pluralize(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def numeric_failures(
+    validation_records: list[dict], rules: list[NumericRule]
+) -> list[tuple[int, list[dict]]]:
+    """`(row index, issues)` for the rows that failed, and nothing for the rows that
+    passed.
+
+    Split out from building a warning row so a caller can validate a *cheap
+    projection* — just the numeric columns the rules actually read — and then pay for
+    any expensive display enrichment only on the handful of rows that failed. That
+    ordering matters a lot in practice: on a real branch this check reads a few
+    hundred sale lines and finds zero problems, and enriching all of them first cost
+    ~750ms of prefetching whose entire output was then thrown away.
+
+    The projection must contain every column the rules name — validate_rows treats a
+    missing column as an unparseable value, so an incomplete projection would flag
+    every row rather than fail loudly.
+    """
+    if not validation_records:
+        return []
+    row_issues = validate_rows(pd.DataFrame.from_records(validation_records), rules)
+    return [(index, issues) for index, issues in enumerate(row_issues) if issues]
+
+
+def new_import_batch(
+    import_type: ImportType,
+    *,
+    branch_id: str | None,
+    uploaded_by: str | None,
+    source_file: str | None,
+    storage_key: str | None = None,
+    request_key: str | None = None,
+) -> ImportBatch:
+    """A fresh (not yet committed) ImportBatch header, identical across the three
+    persist services — client-generated id so the data rows it creates can reference
+    batch.id before any flush, summary filled in by the caller at the end."""
+    return ImportBatch(
+        id=str(uuid.uuid4()),
+        import_type=import_type,
+        branch_id=branch_id,
+        uploaded_by=uploaded_by,
+        filename=source_file,
+        summary={},
+        storage_key=storage_key,
+        request_key=request_key,
+    )
+
+
+def get_or_create_products(
+    db: Session, items: list[tuple[str, str, str | None]]
+) -> tuple[dict[str, Product], int, int]:
+    """Batch upsert products keyed by stock_code, in one round trip.
+
+    `items` is a list of (stock_code, description, group_name) — typically
+    one per row of an import, and may contain duplicate stock_codes (last
+    one wins). Looking each one up individually doesn't scale: a 900-row
+    inventory import would need ~900 sequential round trips to a remote
+    Postgres pooler. Instead this does a single batch SELECT for all codes,
+    then creates/updates the rest in memory (flushed together at the
+    caller's final commit). New products get a client-generated id so
+    callers can use product.id immediately without an extra flush.
+
+    Returns (stock_code -> Product map, created_count, updated_count).
+    """
+    by_code: dict[str, tuple[str, str | None]] = {}
+    for stock_code, description, group_name in items:
+        by_code[stock_code] = (description, group_name)
+
+    existing = {
+        p.stock_code: p
+        for p in db.query(Product).filter(Product.stock_code.in_(by_code.keys())).all()
+    }
+
+    products: dict[str, Product] = {}
+    changes: list[tuple[Product, str, str | None]] = []
+    created = 0
+    updated = 0
+
+    for stock_code, (description, group_name) in by_code.items():
+        product = existing.get(stock_code)
+        if product is None:
+            product = Product(
+                id=str(uuid.uuid4()),
+                stock_code=stock_code,
+                description=description,
+                group_name=group_name,
+            )
+            db.add(product)
+            created += 1
+        else:
+            new_group = group_name if group_name is not None else product.group_name
+            if product.description != description or product.group_name != new_group:
+                changes.append((product, description, new_group))
+            updated += 1
+        products[stock_code] = product
+
+    _bulk_update_products(db, changes)
+    return products, created, updated
+
+
+_PRODUCT_UPDATE_CHUNK = 300
+
+
+def _bulk_update_products(
+    db: Session, changes: list[tuple[Product, str, str | None]]
+) -> None:
+    """One UPDATE per chunk of changed products, not one per product. Letting the ORM
+    flush these individually costs a full round trip to the remote Postgres each —
+    about 70ms apiece, so a year-long sales export that touched ~150 existing
+    products spent over 10 seconds on it. Values are also pushed into the loaded
+    objects without marking them dirty, so the ORM doesn't repeat the UPDATE."""
+    for start in range(0, len(changes), _PRODUCT_UPDATE_CHUNK):
+        chunk = changes[start : start + _PRODUCT_UPDATE_CHUNK]
+        ids = [product.id for product, _, _ in chunk]
+        db.execute(
+            update(Product)
+            .where(Product.id.in_(ids))
+            .values(
+                description=case(
+                    {product.id: description for product, description, _ in chunk},
+                    value=Product.id,
+                ),
+                group_name=case(
+                    {product.id: group for product, _, group in chunk},
+                    value=Product.id,
+                ),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        for product, description, group in chunk:
+            set_committed_value(product, "description", description)
+            set_committed_value(product, "group_name", group)

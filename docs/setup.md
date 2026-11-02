@@ -1,0 +1,63 @@
+# Setup
+
+## Prerequisites
+
+- Node.js + npm
+- Python 3.11+ and [`uv`](https://docs.astral.sh/uv/)
+- A Neon project (Postgres database + Neon Auth)
+
+## Install
+
+```
+npm install
+uv sync --project backend
+```
+
+## Environment variables
+
+Two separate `.env` files — don't mix them up:
+
+**Repo root `.env`** (copy from `.env.example`) — used by the Electron renderer (Vite):
+
+```
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+**`backend/.env`** (copy from `backend/.env.example`) — used by FastAPI:
+
+```
+PORT=8000
+DATABASE_URL=postgresql://...   # Neon Postgres connection string (the pooled endpoint, with sslmode=require)
+NEON_AUTH_BASE_URL=https://<endpoint>.neonauth.<region>.aws.neon.tech/<db>/auth   # Neon console → branch → Auth
+NEON_AUTH_JWKS_URL=<the JWKS URL shown beside it>
+DEEPSEEK_API_KEY=         # optional — powers the chat assistant (admin/development only); used when set
+DEEPSEEK_API_URL=         #   defaults to https://api.deepseek.com; DEEPSEEK_CHAT_MODEL defaults to deepseek-chat
+OPENAI_API_KEY=            # optional — the alternative; both blank disables the assistant
+OPENAI_CHAT_MODEL=         #   the OpenAI model (default gpt-4o-mini); CHAT_PROVIDER=openai|deepseek forces one
+CLOUDFLARE_AI_API_TOKEN=   # optional — meaning search over the assistant's knowledge (docs/knowledge.md); blank = words only
+CLOUDFLARE_ACCOUNT_ID=     #   falls back to R2_ACCOUNT_ID; EMBEDDING_MODEL defaults to @cf/baai/bge-m3
+R2_ACCOUNT_ID=             # optional — Cloudflare R2, stores the original import files;
+R2_ACCESS_KEY_ID=          #   leave all four blank and storage is silently skipped
+R2_SECRET_ACCESS_KEY=
+R2_BUCKET=
+```
+
+Both the database and the auth values come from the Neon console: the connection string under the project's **Connect** button (use the pooled endpoint, `sslmode=require`), and the two auth URLs under **branch → Auth**.
+
+Auth verification uses Neon Auth's JWKS endpoint (EdDSA/Ed25519 signing keys), not a shared secret — no JWT secret needs to be configured. See [auth-and-accounts.md](./auth-and-accounts.md).
+
+## Database
+
+Apply migrations against the configured `DATABASE_URL`:
+
+```
+uv run --directory backend alembic upgrade head
+```
+
+## Run
+
+```
+npm run dev:all
+```
+
+Starts the FastAPI backend (`:8000`) and the Electron app together. See [`CLAUDE.md`](../CLAUDE.md) for the full command reference, including running the backend or frontend independently, tests, and the standalone CSV-cleaning scripts.

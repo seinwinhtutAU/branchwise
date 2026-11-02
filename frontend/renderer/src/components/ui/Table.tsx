@@ -1,0 +1,128 @@
+import {
+  forwardRef,
+  type CSSProperties,
+  type HTMLAttributes,
+  type ReactNode,
+  type TdHTMLAttributes,
+  type ThHTMLAttributes,
+} from "react";
+import { cn } from "@renderer/lib/utils";
+
+// Layout wrapper — no skeleton/empty state (exempt per rubric); use TableSkeleton/EmptyState inside.
+// `overflow-x-auto` here implicitly forces `overflow-y` to `auto` too (CSS rule: an
+// axis left `visible` next to a non-visible one computes to `auto`), which makes THIS
+// div — not the page — the nearest scrolling ancestor for any `position: sticky`
+// descendant like Thead. Since this div has no bounded height by default, that
+// scrolling never actually engages, so Thead's sticky silently no-ops past the first
+// screenful. Callers that need a truly frozen header (e.g. ImportDataView) must pass a
+// `style` with an explicit `maxHeight` so this container becomes a real scrollport —
+// then Thead's `sticky top-0` sticks correctly within it, Excel-frozen-pane style.
+export function TableContainer({
+  children,
+  className,
+  style,
+}: {
+  children: ReactNode;
+  className?: string;
+  style?: CSSProperties;
+}): React.JSX.Element {
+  return (
+    <div
+      style={style}
+      className={cn(
+        "w-full overflow-x-auto rounded-md border border-border shadow-xs",
+        className,
+      )}
+    >
+      <table className="w-full text-sm border-collapse">{children}</table>
+    </div>
+  );
+}
+
+// Sticky at the top of the page scroll (offset below the mobile top bar, flush on desktop)
+// by default. When TableContainer is given a bounded `maxHeight` (a real scrollport),
+// pass className="top-0" here instead — see the TableContainer comment above.
+export function Thead({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}): React.JSX.Element {
+  return (
+    <thead
+      className={cn("sticky top-14 lg:top-0 z-20 bg-brand-subtle", className)}
+    >
+      {children}
+    </thead>
+  );
+}
+
+export function Tbody({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}): React.JSX.Element {
+  return <tbody className={className}>{children}</tbody>;
+}
+
+export const Tr = forwardRef<
+  HTMLTableRowElement,
+  HTMLAttributes<HTMLTableRowElement>
+>(({ children, className, ...props }, ref) => (
+  <tr
+    ref={ref}
+    // Explain mode: a click on a row explains that one row (see features/explain).
+    data-explain=""
+    className={cn(
+      "transition-colors duration-150 hover:bg-brand-subtle/30 group",
+      className,
+    )}
+    {...props}
+  >
+    {children}
+  </tr>
+));
+Tr.displayName = "Tr";
+
+// Light gridlines between every cell (header and body) for a spreadsheet-like look.
+export function Th({
+  children,
+  className,
+  ...props
+}: ThHTMLAttributes<HTMLTableCellElement>): React.JSX.Element {
+  return (
+    <th
+      // Explain mode: a click on a column header explains that column.
+      data-explain=""
+      className={cn(
+        "text-left font-semibold text-text-muted text-[11px] uppercase tracking-wider px-2.5 py-2 whitespace-nowrap",
+        "border-b border-r border-border select-none",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </th>
+  );
+}
+
+export function Td({
+  children,
+  className,
+  ...props
+}: TdHTMLAttributes<HTMLTableCellElement>): React.JSX.Element {
+  return (
+    <td
+      className={cn(
+        "px-2.5 py-1 sm:py-1.5 text-text-primary align-middle border-b border-r border-border text-sm",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </td>
+  );
+}

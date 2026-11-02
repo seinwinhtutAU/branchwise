@@ -1,0 +1,919 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The source sprite is split into four separate transparent frames before display.
+   This prevents a frame-alignment adjustment from exposing a neighbouring sprite. */
+.branchwise-cat-pet-container {
+  position: relative;
+  display: block;
+}
+
+/* A quieter, professional assistant alternative. It shares the cat's placement,
+   drag, chat, and help controls; only the visual feedback changes. */
+.branchwise-robot-pet {
+  position: relative;
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+
+.branchwise-robot-pet-shell {
+  position: relative;
+  display: block;
+  height: 100%;
+  width: 100%;
+  filter: drop-shadow(0 2px 2px rgba(55, 60, 93, 0.2));
+  animation: branchwise-robot-idle 7s ease-in-out infinite;
+}
+
+.branchwise-robot-frame {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  width: 100%;
+  object-fit: contain;
+  opacity: 0;
+  image-rendering: pixelated;
+  pointer-events: none;
+  user-select: none;
+}
+
+.branchwise-robot-frame-idle {
+  opacity: 1;
+}
+
+@keyframes branchwise-robot-idle {
+  0%,
+  100% {
+    transform: translateY(0);
+    filter: drop-shadow(0 2px 2px rgba(55, 60, 93, 0.18));
+  }
+
+  50% {
+    transform: translateY(-1px);
+    filter: drop-shadow(0 3px 4px rgba(99, 102, 241, 0.28));
+  }
+}
+
+@keyframes branchwise-robot-thinking {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+    filter: drop-shadow(0 2px 3px rgba(99, 102, 241, 0.25));
+  }
+
+  50% {
+    transform: translateY(-1px) scale(1.025);
+    filter: drop-shadow(0 3px 6px rgba(99, 102, 241, 0.45));
+  }
+}
+
+@keyframes branchwise-robot-greeting {
+  0% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-3px) scale(1.04); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+@keyframes branchwise-robot-dragging {
+  0%,
+  100% { transform: translateY(0) rotate(-2deg); }
+  50% { transform: translateY(-2px) rotate(2deg); }
+}
+
+@keyframes branchwise-robot-idle-face {
+  0%,
+  30%,
+  32%,
+  68%,
+  70%,
+  100% {
+    opacity: 1;
+  }
+
+  31%,
+  69% {
+    opacity: 0;
+  }
+}
+
+@keyframes branchwise-robot-blink-face {
+  0%,
+  30%,
+  32%,
+  68%,
+  70%,
+  100% {
+    opacity: 0;
+  }
+
+  31%,
+  69% {
+    opacity: 1;
+  }
+}
+
+.branchwise-robot-mode-idle .branchwise-robot-frame-idle {
+  animation: branchwise-robot-idle-face 24s steps(1, end) infinite;
+}
+
+.branchwise-robot-mode-idle .branchwise-robot-frame-blink {
+  animation: branchwise-robot-blink-face 24s steps(1, end) infinite;
+}
+
+.branchwise-robot-mode-thinking .branchwise-robot-pet-shell {
+  animation: branchwise-robot-thinking 1.8s ease-in-out infinite;
+}
+
+.branchwise-robot-mode-thinking .branchwise-robot-frame-idle {
+  opacity: 0;
+}
+
+.branchwise-robot-mode-thinking .branchwise-robot-frame-thinking {
+  opacity: 1;
+}
+
+.branchwise-robot-mode-greeting .branchwise-robot-pet-shell,
+.branchwise-robot-mode-happy .branchwise-robot-pet-shell {
+  animation: branchwise-robot-greeting 0.8s ease-out both;
+}
+
+.branchwise-robot-mode-greeting .branchwise-robot-frame-idle,
+.branchwise-robot-mode-happy .branchwise-robot-frame-idle {
+  opacity: 0;
+}
+
+.branchwise-robot-mode-greeting .branchwise-robot-frame-happy,
+.branchwise-robot-mode-happy .branchwise-robot-frame-happy {
+  opacity: 1;
+}
+
+.branchwise-robot-mode-dragging .branchwise-robot-pet-shell {
+  animation: branchwise-robot-dragging 0.45s ease-in-out infinite;
+}
+
+.branchwise-robot-mode-dragging .branchwise-robot-frame-idle {
+  opacity: 0;
+}
+
+.branchwise-robot-mode-dragging .branchwise-robot-frame-effort {
+  opacity: 1;
+}
+
+.branchwise-cat-pet {
+  position: relative;
+}
+
+.branchwise-cat-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  image-rendering: pixelated;
+  pointer-events: none;
+  user-select: none;
+}
+
+.branchwise-cat-pet-shell {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  animation: branchwise-cat-float 5.2s ease-in-out infinite;
+}
+
+.branchwise-cat-ground-shadow {
+  position: absolute;
+  z-index: 0;
+  /* The cat's tail shifts its visual centre right of the transparent canvas. */
+  left: 58%;
+  bottom: 3px;
+  width: 68%;
+  height: 11%;
+  background: rgba(74, 82, 111, 0.52);
+  clip-path: polygon(15% 0, 85% 0, 100% 25%, 100% 75%, 85% 100%, 15% 100%, 0 75%, 0 25%);
+  transform: translateX(-50%);
+  opacity: 0.6;
+}
+
+@keyframes branchwise-cat-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-1px);
+  }
+}
+
+
+@keyframes branchwise-cat-idle {
+  0%,
+  36%,
+  39%,
+  54%,
+  56%,
+  66.66% {
+    opacity: 1;
+  }
+
+  37%,
+  38%,
+  55%,
+  66.67%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes branchwise-cat-blink {
+  0%,
+  36%,
+  39%,
+  100% {
+    opacity: 0;
+  }
+
+  37%,
+  38% {
+    opacity: 1;
+  }
+}
+
+@keyframes branchwise-cat-tail {
+  0%,
+  13%,
+  16%,
+  100% {
+    opacity: 0;
+  }
+
+  14%,
+  15% {
+    opacity: 1;
+  }
+}
+
+@keyframes branchwise-cat-idle-alert {
+  0%,
+  62%,
+  64%,
+  100% {
+    opacity: 0;
+  }
+
+  63% {
+    opacity: 1;
+  }
+}
+
+@keyframes branchwise-cat-idle-wash {
+  0%,
+  53%,
+  56%,
+  100% {
+    opacity: 0;
+  }
+
+  54%,
+  55% {
+    opacity: 1;
+  }
+}
+
+@keyframes branchwise-cat-idle-sleep {
+  0%,
+  66.66%,
+  100% {
+    opacity: 0;
+  }
+
+  66.67%,
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes branchwise-cat-greeting-idle {
+  0%,
+  12%,
+  100% {
+    opacity: 1;
+  }
+
+  13%,
+  99% {
+    opacity: 0;
+  }
+}
+
+@keyframes branchwise-cat-greeting-wave {
+  0%,
+  12%,
+  76%,
+  100% {
+    opacity: 0;
+  }
+
+  13%,
+  75% {
+    opacity: 1;
+  }
+}
+
+@keyframes branchwise-cat-greeting-alert {
+  0%,
+  75% {
+    opacity: 0;
+  }
+
+  76%,
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes branchwise-cat-thinking {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes branchwise-cat-happy {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  35% {
+    transform: translateY(-3px);
+  }
+
+  65% {
+    transform: translateY(-1px);
+  }
+}
+
+@keyframes branchwise-cat-dragging {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-2deg);
+  }
+
+  50% {
+    transform: translateY(-2px) rotate(2deg);
+  }
+}
+
+
+.branchwise-cat-frame-idle {
+  opacity: 1;
+}
+
+.branchwise-cat-frame-blink,
+.branchwise-cat-frame-tail,
+.branchwise-cat-frame-wave,
+.branchwise-cat-frame-alert,
+.branchwise-cat-frame-thinking,
+.branchwise-cat-frame-sleep,
+.branchwise-cat-frame-wash,
+.branchwise-cat-frame-happy {
+  opacity: 0;
+}
+
+.branchwise-cat-frame-blink {
+  transform: translateX(11px);
+}
+
+.branchwise-cat-frame-wave {
+  transform: translate(0, 6px);
+}
+
+.branchwise-cat-frame-alert {
+  transform: translate(10px, 6px);
+}
+
+.branchwise-cat-mode-idle .branchwise-cat-frame-idle {
+  animation: branchwise-cat-idle 180s steps(1, end) infinite;
+}
+
+.branchwise-cat-mode-idle .branchwise-cat-frame-blink {
+  animation: branchwise-cat-blink 180s steps(1, end) infinite;
+}
+
+.branchwise-cat-mode-idle .branchwise-cat-frame-tail {
+  animation: branchwise-cat-tail 180s steps(1, end) infinite;
+}
+
+.branchwise-cat-mode-idle .branchwise-cat-frame-alert {
+  animation: branchwise-cat-idle-alert 180s steps(1, end) infinite;
+}
+
+.branchwise-cat-mode-idle .branchwise-cat-frame-sleep {
+  animation: branchwise-cat-idle-sleep 180s steps(1, end) infinite;
+}
+
+.branchwise-cat-mode-idle .branchwise-cat-frame-wash {
+  animation: branchwise-cat-idle-wash 180s steps(1, end) infinite;
+}
+
+.branchwise-cat-mode-greeting .branchwise-cat-frame-idle {
+  animation: branchwise-cat-greeting-idle 1.8s steps(1, end) both;
+}
+
+.branchwise-cat-mode-greeting .branchwise-cat-frame-wave {
+  animation: branchwise-cat-greeting-wave 1.8s steps(1, end) both;
+}
+
+.branchwise-cat-mode-greeting .branchwise-cat-frame-alert {
+  animation: branchwise-cat-greeting-alert 1.8s steps(1, end) both;
+}
+
+.branchwise-cat-mode-thinking .branchwise-cat-frame-idle {
+  opacity: 0;
+}
+
+.branchwise-cat-mode-thinking .branchwise-cat-frame-thinking {
+  opacity: 1;
+  animation: branchwise-cat-thinking 1.8s ease-in-out infinite;
+}
+
+.branchwise-cat-mode-happy .branchwise-cat-frame-idle {
+  opacity: 0;
+}
+
+.branchwise-cat-mode-happy .branchwise-cat-frame-happy {
+  opacity: 1;
+  animation: branchwise-cat-happy 1.4s steps(2, end) both;
+}
+
+.branchwise-cat-mode-dragging .branchwise-cat-frame-idle {
+  opacity: 1;
+  animation: branchwise-cat-dragging 0.45s ease-in-out infinite;
+}
+
+
+
+@media (prefers-reduced-motion: reduce) {
+  .branchwise-cat-pet-shell,
+  .branchwise-cat-frame,
+  .branchwise-cat-ground-shadow,
+  .branchwise-robot-pet-shell,
+  .branchwise-robot-frame {
+    animation: none;
+  }
+
+  .branchwise-cat-frame-idle {
+    opacity: 1;
+  }
+
+  .branchwise-robot-frame-idle {
+    opacity: 1;
+  }
+}
+
+:root {
+  /* Backgrounds — 3 layers of depth */
+  --color-bg-base: #ffffff;
+  --color-bg-subtle: #f9fafb;
+  --color-bg-raised: #f3f4f6;
+  /* A very light gray for a page whose content sits on white cards. */
+  --color-bg-page: #f7f8fa;
+  --color-bg-overlay: rgba(0, 0, 0, 0.04);
+  --color-progress-track: #e8eaf0;
+  --color-progress-fill: #7377c0;
+
+  /* Foreground */
+  --color-text-primary: #111827;
+  --color-text-secondary: #374151;
+  --color-text-muted: #6b7280;
+  --color-text-disabled: #d1d5db;
+  --color-text-inverse: #ffffff;
+
+  /* Brand — one purple-blue for retail and wholesale alike. Dark mode uses a quieter
+     companion shade below so the accent feels proportionate on a charcoal surface. */
+  --color-brand: #6366f1;
+  --color-brand-hover: #4f46e5;
+  --color-brand-active: #4338ca;
+  --color-brand-subtle: #eef2ff;
+  --color-brand-text: #ffffff;
+
+  /* Semantic — each nudged 10% toward the brand purple-blue (#6366f1) rather than left as
+     a pure textbook green/amber/red, so the three read as part of the same coloured
+     family as the rest of the app instead of clashing primaries next to it. Deliberately
+     a small blend: enough to feel coordinated, not so much that success/warning/error
+     stop reading as green/yellow/red at a glance. Subtle backgrounds untouched — amber's
+     tint in particular has almost no blue in it, so blending brand into it turned the
+     warning chip a muddy grey instead of a softer yellow. */
+  --color-success: #18b18c;
+  --color-success-subtle: #ecfdf5;
+  --color-warning: #e69822;
+  --color-warning-subtle: #fffbeb;
+  --color-error: #e14755;
+  --color-error-subtle: #fef2f2;
+  --color-info: #3b82f6;
+  --color-info-subtle: #eff6ff;
+
+  /* Chart and dashboard tokens */
+  --color-chart-emerald: #10b981;
+  --color-chart-purple: #8b5cf6;
+  --color-chart-amber: #e88b1a;
+  --color-chart-blue: #3b82f6;
+  --color-chart-indigo: #6366f1;
+
+  /* A DotPill's border — its own token rather than an opacity modifier on the solid
+     colour above, so dark mode (below) can mute it independently instead of the border
+     and the dot/text fighting over one shared value. Baked at the same 30% this used to
+     be written inline as, so light mode looks exactly as it did. */
+  --color-success-pill-border: rgba(24, 177, 140, 0.3);
+  --color-warning-pill-border: rgba(230, 152, 34, 0.3);
+  --color-error-pill-border: rgba(225, 71, 85, 0.3);
+  --color-brand-pill-border: rgba(99, 102, 241, 0.3);
+
+  /* Borders — a shade darker than a bare Tailwind gray-200/300 so panels and inputs
+     read as outlined on a light background instead of almost blending into it. */
+  --color-border: #d7dbe0;
+  --color-border-strong: #c0c6cf;
+  --color-border-brand: var(--color-brand);
+
+  /* Shadows */
+  /* A card or panel gets the faintest lift (xs/sm) so it separates from the page behind
+     it without needing a stronger border or a tinted background to do that job — one
+     more way to tell surfaces apart without reaching for colour. Dropdowns and dialogs
+     still get the stronger md/lg/xl, since those genuinely float above everything else. */
+  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.07);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.16);
+
+  /* Typography */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    system-ui, Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+
+  /* Radius */
+  /* Desktop software corners, not landing-page corners. Everything from a badge to a
+     panel reads through these four, so the whole app tightens from here. */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-xl: 8px;
+  --radius-full: 9999px;
+}
+
+/* Native select menus are rendered by the desktop browser outside the normal
+   stacking context. Drawer bodies are intentionally white, so keep their open
+   menus on the same light surface instead of letting the OS render a dark list. */
+.drawer-shell select {
+  color-scheme: light;
+  background-color: #ffffff;
+  color: #111827;
+}
+
+.drawer-shell select option {
+  background-color: #ffffff;
+  color: #111827;
+}
+
+/* The four stages a shipment passes through, each needing to be told apart at a glance on
+   the Delivery screen's journey cards and tracking table. Told apart by lightness/hue
+   steps along one story instead of four unrelated saturated colours: still at the
+   supplier is neutral, moving (cargo, then a stop) is two shades of the app's own brand
+   purple-blue, and arrived reuses the app's own "success" green rather than a fifth
+   invented hue — so a shipment in motion reads as the same colour the rest of the app
+   already uses for "this is the active thing", in both light and dark alike. */
+:root {
+  --color-journey-supplier: #334155;
+  --color-journey-cargo: var(--color-brand);
+  --color-journey-stop: var(--color-brand-active);
+  --color-journey-final: #10b981;
+
+  /* The faint wash under each stage's name band, so a card reads as one piece of its
+     stage rather than as a coloured strip sitting on plain white. */
+  --color-journey-supplier-soft: #f1f5f9;
+  --color-journey-cargo-soft: var(--color-brand-subtle);
+  --color-journey-stop-soft: #e0e7ff;
+  --color-journey-final-soft: #ecfdf5;
+}
+
+:root[data-theme="dark"] {
+  --color-journey-supplier: #9aa1b1;
+  --color-journey-cargo: var(--color-brand);
+  --color-journey-stop: var(--color-brand-active);
+  --color-journey-final: #6bb99f;
+
+  --color-journey-supplier-soft: #242a33;
+  --color-journey-cargo-soft: #282b4d;
+  --color-journey-stop-soft: #313159;
+  --color-journey-final-soft: #203630;
+}
+
+/* Wholesale used to be blue-on-white, kept apart from the retail indigo. Retail and
+   Wholesale now share one brand colour (see :root's Brand block) — this class is kept
+   only for the border-thickness tweak below, so Wholesale's bordered cards and controls
+   still read with a clearer edge than retail's hairlines. Directional separators such as
+   border-b remain one pixel so internal rows stay quiet. */
+.workspace-wholesale .border {
+  border-width: 1.5px;
+}
+
+.workspace-wholesale input.border,
+.workspace-wholesale textarea.border,
+.workspace-wholesale select.border {
+  border-width: 1px;
+}
+
+:root[data-theme="dark"] {
+  /* Dark mode stays deliberately off-black. The small warm shift avoids the hard,
+     high-contrast look of a pure charcoal screen during long data-entry sessions. */
+  --color-bg-base: #17191f;
+  --color-bg-subtle: #1d2028;
+  --color-bg-raised: #252934;
+  --color-bg-page: #1b1e25;
+  --color-bg-overlay: rgba(255, 255, 255, 0.035);
+  /* Progress is deliberately quieter than a primary action: it should show motion
+     during long imports without pulling attention away from the surrounding form. */
+  --color-progress-track: #2b303a;
+  --color-progress-fill: #7a7ec0;
+
+  /* White is softened too: it keeps dense tables readable without sparkling against
+     the graphite surfaces. */
+  --color-text-primary: #ecebf0;
+  --color-text-secondary: #c9c8d0;
+  --color-text-muted: #9798a3;
+  --color-text-disabled: #5c5f6b;
+  --color-text-inverse: #17191f;
+
+  /* A restrained periwinkle replaces the bright blue-violet. It remains distinct for
+     links, focus, and primary actions, but no longer dominates an otherwise quiet page. */
+  --color-brand: #6e71b4;
+  --color-brand-hover: #6265a6;
+  --color-brand-active: #565993;
+  --color-brand-subtle: #272943;
+
+  /* Status colours retain their meaning while moving closer to the shared, muted palette. */
+  --color-success: #67b69c;
+  --color-success-subtle: #203630;
+  --color-warning: #d4ab67;
+  --color-warning-subtle: #382f22;
+  --color-error: #d5808a;
+  --color-error-subtle: #3b272c;
+  --color-info: #78a9d7;
+  --color-info-subtle: #22313f;
+
+  /* Chart colours are a little lighter than UI accents so adjacent series remain easy
+     to scan, but are intentionally less saturated than the previous neon-like set. */
+  --color-chart-emerald: #6fbaa1;
+  --color-chart-purple: #a5a2d8;
+  --color-chart-amber: #d8b06a;
+  --color-chart-blue: #7aa9d7;
+  --color-chart-indigo: #9194d2;
+
+  --color-success-pill-border: #315f51;
+  --color-warning-pill-border: #665035;
+  --color-error-pill-border: #653c44;
+  --color-brand-pill-border: #4e5186;
+
+  --color-border: #393e4a;
+  --color-border-strong: #4b515f;
+
+  /* Dark surfaces separate through their tone first; shadows are reserved for real
+     overlays instead of making every card look heavily lifted. */
+  --shadow-xs: 0 1px 2px rgba(8, 10, 14, 0.18);
+  --shadow-sm: 0 1px 3px rgba(8, 10, 14, 0.24);
+  --shadow-md: 0 2px 8px rgba(8, 10, 14, 0.32);
+  --shadow-lg: 0 8px 24px rgba(8, 10, 14, 0.42);
+  --shadow-xl: 0 16px 48px rgba(8, 10, 14, 0.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  /* `system` removes data-theme, so this repeats the explicit dark mode above for
+     whichever surfaces the OS itself switches into dark. */
+  :root:not([data-theme="light"]) {
+    --color-bg-base: #17191f;
+    --color-bg-subtle: #1d2028;
+    --color-bg-raised: #252934;
+    --color-bg-page: #1b1e25;
+    --color-bg-overlay: rgba(255, 255, 255, 0.035);
+    --color-progress-track: #2b303a;
+    --color-progress-fill: #7a7ec0;
+
+    --color-text-primary: #ecebf0;
+    --color-text-secondary: #c9c8d0;
+    --color-text-muted: #9798a3;
+    --color-text-disabled: #5c5f6b;
+    --color-text-inverse: #17191f;
+
+    --color-brand: #6e71b4;
+    --color-brand-hover: #6265a6;
+    --color-brand-active: #565993;
+    --color-brand-subtle: #272943;
+
+    --color-success: #67b69c;
+    --color-success-subtle: #203630;
+    --color-warning: #d4ab67;
+    --color-warning-subtle: #382f22;
+    --color-error: #d5808a;
+    --color-error-subtle: #3b272c;
+    --color-info: #78a9d7;
+    --color-info-subtle: #22313f;
+
+    --color-chart-emerald: #6fbaa1;
+    --color-chart-purple: #a5a2d8;
+    --color-chart-amber: #d8b06a;
+    --color-chart-blue: #7aa9d7;
+    --color-chart-indigo: #9194d2;
+
+    --color-success-pill-border: #315f51;
+    --color-warning-pill-border: #665035;
+    --color-error-pill-border: #653c44;
+    --color-brand-pill-border: #4e5186;
+
+    --color-border: #393e4a;
+    --color-border-strong: #4b515f;
+
+    --color-journey-supplier: #9aa1b1;
+    --color-journey-cargo: var(--color-brand);
+    --color-journey-stop: var(--color-brand-active);
+    --color-journey-final: #6bb99f;
+
+    --color-journey-supplier-soft: #242a33;
+    --color-journey-cargo-soft: #282b4d;
+    --color-journey-stop-soft: #313159;
+    --color-journey-final-soft: #203630;
+
+    --shadow-xs: 0 1px 2px rgba(8, 10, 14, 0.18);
+    --shadow-sm: 0 1px 3px rgba(8, 10, 14, 0.24);
+    --shadow-md: 0 2px 8px rgba(8, 10, 14, 0.32);
+    --shadow-lg: 0 8px 24px rgba(8, 10, 14, 0.42);
+    --shadow-xl: 0 16px 48px rgba(8, 10, 14, 0.5);
+  }
+}
+
+/* Tailwind's bare `border` and `divide-*` utilities only set a width; without a
+   colour utility they inherit the framework's light-gray preflight colour. Give
+   those structural lines the same quiet token as named borders, so cards, form
+   groups, and dividers never flash white in dark mode. Explicit semantic borders
+   (for example border-error or border-brand) remain more specific and still win. */
+*,
+::before,
+::after {
+  border-color: var(--color-border);
+}
+
+body {
+  background: var(--color-bg-base);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  /* Business software is read in volume — a size down means several more rows a screen. */
+  font-size: 13px;
+  /* Prevent default browser selection drag on empty areas */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Prevent accidental text selection across UI chrome (desktop feel) */
+button,
+nav,
+aside,
+header,
+[role="tab"],
+[role="button"],
+th,
+.ui-chrome {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Keep inputs, table data cells, numbers, and readable text explicitly selectable */
+input,
+textarea,
+td,
+p,
+code,
+pre,
+.selectable-text {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Desktop native window dragging */
+.app-drag-region {
+  -webkit-app-region: drag;
+}
+
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Desktop overlay scrollbar (replaces chunky browser scrollbars on Windows & Mac) */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* A number field the reader types a whole figure into — a price, a quantity — rather
+   than nudging one unit at a time. The browser's spinner arrows only take up room in
+   the field and invite a click that would change the number by one. */
+.no-spinner {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Row animations respect a system request for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-row-flash {
+    animation: none;
+  }
+  /* A row being deleted has to actually leave, animation or not. */
+  .animate-row-leave {
+    animation: none;
+    display: none;
+  }
+}
+
+/* Explain mode (features/explain): while it is on, what can be explained lifts out of the page on
+   hover, and the thing being explained stays marked while its bubble is open. */
+body[data-explain-mode="on"] [data-explain] {
+  cursor: help;
+  transition:
+    outline-color 150ms ease,
+    box-shadow 150ms ease,
+    background-color 150ms ease;
+}
+body[data-explain-mode="on"] [data-explain]:hover {
+  outline: 2px solid color-mix(in srgb, var(--color-brand) 75%, transparent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--color-brand) 10%, transparent);
+}
+/* A row or a column heading sits inside a clipped table, so its mark goes inside it. */
+body[data-explain-mode="on"] tr[data-explain]:hover,
+body[data-explain-mode="on"] th[data-explain]:hover {
+  outline-offset: -2px;
+  box-shadow: none;
+  background-color: color-mix(in srgb, var(--color-brand) 8%, transparent);
+}
+body[data-explain-mode="on"] [data-explain-selected] {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--color-brand) 16%, transparent);
+}
+body[data-explain-mode="on"] tr[data-explain-selected],
+body[data-explain-mode="on"] th[data-explain-selected] {
+  outline-offset: -2px;
+  box-shadow: none;
+  background-color: color-mix(in srgb, var(--color-brand) 14%, transparent);
+}
+
+@keyframes explain-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.explain-pop {
+  animation: explain-pop 160ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .explain-pop {
+    animation: none;
+  }
+}

@@ -1,0 +1,591 @@
+import { useEffect, useState } from "react";
+import { FloatingPortal } from "@floating-ui/react";
+import { Button } from "@renderer/components/ui/Button";
+import { Input } from "@renderer/components/ui/Input";
+import { CloseIcon } from "@renderer/components/ui/icons";
+
+export type ImportKind = "sales" | "inventory";
+
+interface CompletenessDay {
+  date: string;
+  status: "open" | "closed";
+  note: string | null;
+  closed_at: string | null;
+  closed_by_name: string | null;
+}
+
+interface CompletenessTypeSection {
+  days: CompletenessDay[];
+  open_count: number;
+}
+
+export interface CompletenessBranch {
+  branch_id: string;
+  branch_name: string;
+  sales: CompletenessTypeSection;
+  inventory: CompletenessTypeSection;
+}
+
+export interface PurchaseNumberGap {
+  prefix: string;
+  start: number;
+  end: number;
+  start_number: string;
+  end_number: string;
+  missing_count: number;
+  note?: string | null;
+}
+
+export interface CompletenessResponse {
+  checked_through: string;
+  branches: CompletenessBranch[];
+}
+
+type DayListMode = "missing" | "ignored";
+
+interface DaySectionActions {
+  onIgnore: (
+    branchId: string,
+    importType: ImportKind,
+    dates: string[],
+    note?: string,
+  ) => Promise<void>;
+  onRestore: (
+    branchId: string,
+    importType: ImportKind,
+    dates: string[],
+  ) => Promise<void>;
+}
+
+interface DaySectionProps extends DaySectionActions {
+  title: string;
+  branchId: string;
+  importType: ImportKind;
+  days: CompletenessDay[];
+  mode: DayListMode;
+  canManage: boolean;
+  isUpdating: boolean;
+}
+
+interface DayMonthGroup {
+  key: string;
+  year: number;
+  monthLabel: string;
+  days: CompletenessDay[];
+}
+
+function groupDaysByMonth(days: CompletenessDay[]): DayMonthGroup[] {
+  const groups = new Map<string, DayMonthGroup>();
+
+  for (const day of days) {
+    const [year, month] = day.date.split("-").map(Number);
+    const key = String(year) + "-" + String(month).padStart(2, "0");
+    const existing = groups.get(key);
+    if (existing) {
+      existing.days.push(day);
+      continue;
+    }
+    groups.set(key, {
+      key,
+      year,
+      monthLabel: new Intl.DateTimeFormat("en", { month: "long" }).format(
+        new Date(year, month - 1, 1),
+      ),
+      days: [day],
+    });
+  }
+
+  return [...groups.values()];
+}
+
+function DaySection({
+  title,
+  branchId,
+  importType,
+  days,
+  mode,
+  canManage,
+  onIgnore,
+  onRestore,
+  isUpdating,
+}: DaySectionProps): React.JSX.Element {
+  const [selectedDates, setSelectedDates] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [ignoreNote, setIgnoreNote] = useState("");
+  const selected = days.filter((day) => selectedDates.has(day.date));
+  const isIgnoreMode = mode === "missing";
+  const monthGroups = groupDaysByMonth(days);
+
+  function toggleDate(date: string): void {
+    setSelectedDates((current) => {
+      const next = new Set(current);
+      if (next.has(date)) next.delete(date);
+      else next.add(date);
+      return next;
+    });
+  }
+
+  async function confirmAction(): Promise<void> {
+    const dates = selected.map((day) => day.date);
+    if (isIgnoreMode) {
+      await onIgnore(
+        branchId,
+        importType,
+        dates,
+        ignoreNote.trim() || undefined,
+      );
+    } else {
+      await onRestore(branchId, importType, dates);
+    }
+    setSelectedDates(new Set());
+    setIgnoreNote("");
+    setIsConfirming(false);
+  }
+
+  if (days.length === 0) return <></>;
+
+  return (
+    <div className="min-w-0 flex-1">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-muted">{title}</div>
+        {canManage && selected.length > 0 && !isConfirming && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-text-muted">
+              {selected.length} selected
+            </span>
+            <Button
+              variant={isIgnoreMode ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2 text-xs"
+              loading={isUpdating}
+              onClick={() => setIsConfirming(true)}
+            >
+              {isIgnoreMode
+                ? `Ignore ${selected.length}`
+                : `Restore ${selected.length}`}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {isConfirming && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-border bg-bg-surface p-2">
+          <span className="text-xs font-medium text-text-primary">
+            {isIgnoreMode
+              ? `Ignore ${selected.length} selected day${selected.length === 1 ? "" : "s"}?`
+              : `Restore ${selected.length} ignored day${selected.length === 1 ? "" : "s"}?`}
+          </span>
+          {isIgnoreMode && (
+            <Input
+              size="sm"
+              value={ignoreNote}
+              onChange={(event) => setIgnoreNote(event.target.value)}
+              placeholder="Reason (optional)"
+              className="w-40"
+              disabled={isUpdating}
+            />
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={isUpdating}
+              onClick={() => setIsConfirming(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              loading={isUpdating}
+              onClick={() => void confirmAction()}
+            >
+              Confirm {isIgnoreMode ? "Ignore" : "Restore"}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <div className="pr-1">
+        <div className="flex flex-col gap-3">
+          {monthGroups.map((group, index) => {
+            const previous = monthGroups[index - 1];
+            const showYear =
+              previous === undefined || previous.year !== group.year;
+            return (
+              <div
+                key={group.key}
+                className={
+                  showYear && previous !== undefined
+                    ? "border-t border-border pt-3"
+                    : undefined
+                }
+              >
+                {showYear && (
+                  <div className="mb-1.5 text-sm font-bold text-text-primary">
+                    {group.year}
+                  </div>
+                )}
+                <div className="mb-1.5 text-sm font-semibold text-text-secondary">
+                  {group.monthLabel} ({group.days.length}{" "}
+                  {group.days.length === 1 ? "day" : "days"})
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {group.days.map((day) => (
+                    <label
+                      key={day.date}
+                      className="flex cursor-pointer items-center gap-2 rounded-md border border-border bg-bg-base px-2.5 py-1.5"
+                    >
+                      {canManage && (
+                        <input
+                          type="checkbox"
+                          checked={selectedDates.has(day.date)}
+                          disabled={isUpdating || isConfirming}
+                          onChange={() => toggleDate(day.date)}
+                          className="h-3.5 w-3.5 shrink-0 accent-brand"
+                          aria-label={"Select " + day.date}
+                        />
+                      )}
+                      <span className="text-xs font-medium tabular-nums text-text-primary">
+                        {day.date}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Which branch/panel the Import Health drawer is open on, or closed when null. */
+export type DrawerPanel = "sales" | "inventory" | "purchase" | "ignored";
+
+interface ImportHealthDrawerTarget {
+  branchId: string;
+  panel: DrawerPanel;
+}
+
+function PurchaseGapSection({
+  gaps,
+  mode = "missing",
+  canManage = false,
+  isUpdating = false,
+  onIgnore,
+  onRestore,
+}: {
+  gaps: PurchaseNumberGap[];
+  mode?: DayListMode;
+  canManage?: boolean;
+  isUpdating?: boolean;
+  onIgnore?: (gaps: PurchaseNumberGap[], note?: string) => Promise<void>;
+  onRestore?: (gaps: PurchaseNumberGap[]) => Promise<void>;
+}): React.JSX.Element {
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [note, setNote] = useState("");
+  const selectedGaps = gaps.filter((gap) =>
+    selected.has(`${gap.prefix}:${gap.start}:${gap.end}`),
+  );
+  const isIgnoreMode = mode === "missing";
+
+  async function confirmAction(): Promise<void> {
+    if (isIgnoreMode) await onIgnore?.(selectedGaps, note.trim() || undefined);
+    else await onRestore?.(selectedGaps);
+    setSelected(new Set());
+    setNote("");
+    setIsConfirming(false);
+  }
+
+  return (
+    <div className="min-w-0 flex-1">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm font-semibold text-text-secondary">
+          {isIgnoreMode
+            ? "Missing purchase numbers"
+            : "Ignored purchase numbers"}
+        </div>
+        {canManage && selectedGaps.length > 0 && !isConfirming && (
+          <Button
+            variant={isIgnoreMode ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 px-2 text-xs"
+            loading={isUpdating}
+            onClick={() => setIsConfirming(true)}
+          >
+            {isIgnoreMode
+              ? `Ignore ${selectedGaps.length}`
+              : `Restore ${selectedGaps.length}`}
+          </Button>
+        )}
+      </div>
+      {isConfirming && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-border bg-bg-surface p-2">
+          <span className="text-xs font-medium text-text-primary">
+            {isIgnoreMode ? "Ignore" : "Restore"} {selectedGaps.length} selected
+            purchase gap{selectedGaps.length === 1 ? "" : "s"}?
+          </span>
+          {isIgnoreMode && (
+            <Input
+              size="sm"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="Reason (optional)"
+              className="w-40"
+              disabled={isUpdating}
+            />
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={isUpdating}
+              onClick={() => setIsConfirming(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              loading={isUpdating}
+              onClick={() => void confirmAction()}
+            >
+              Confirm {isIgnoreMode ? "Ignore" : "Restore"}
+            </Button>
+          </div>
+        </div>
+      )}
+      <div className="flex flex-col gap-1.5">
+        {gaps.map((gap) => (
+          <label
+            key={gap.start_number + "-" + gap.end_number}
+            className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-border bg-bg-base px-2.5 py-1.5"
+          >
+            <span className="flex items-center gap-2">
+              {canManage && (
+                <input
+                  type="checkbox"
+                  checked={selected.has(
+                    `${gap.prefix}:${gap.start}:${gap.end}`,
+                  )}
+                  disabled={isUpdating || isConfirming}
+                  onChange={() =>
+                    setSelected((current) => {
+                      const next = new Set(current);
+                      const key = `${gap.prefix}:${gap.start}:${gap.end}`;
+                      if (next.has(key)) next.delete(key);
+                      else next.add(key);
+                      return next;
+                    })
+                  }
+                  className="h-3.5 w-3.5 shrink-0 accent-brand"
+                  aria-label={`Select ${gap.start_number} to ${gap.end_number}`}
+                />
+              )}
+              <span className="text-xs font-medium tabular-nums text-text-primary">
+                {gap.start_number}–{gap.end_number}
+              </span>
+            </span>
+            <span className="shrink-0 text-xs text-text-muted">
+              {gap.missing_count}{" "}
+              {gap.missing_count === 1 ? "number" : "numbers"}
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface ImportHealthDrawerProps extends DaySectionActions {
+  target: ImportHealthDrawerTarget | null;
+  branchName: string | null;
+  completeness: CompletenessBranch | null;
+  purchaseGaps: PurchaseNumberGap[];
+  ignoredPurchaseGaps: PurchaseNumberGap[];
+  canManage: boolean;
+  isUpdating: boolean;
+  onIgnorePurchase: (gaps: PurchaseNumberGap[], note?: string) => Promise<void>;
+  onRestorePurchase: (gaps: PurchaseNumberGap[]) => Promise<void>;
+  onClose: () => void;
+}
+
+/**
+ * The missing/ignored-day detail for one branch, as a slide-over rather than an
+ * inline expansion — resolving a branch's open days used to push every row beneath
+ * it down the page, which meant the table you were scanning kept jumping around as
+ * you worked through branches. A drawer keeps the table still.
+ */
+export function ImportHealthDrawer({
+  target,
+  branchName,
+  completeness,
+  purchaseGaps,
+  ignoredPurchaseGaps,
+  canManage,
+  isUpdating,
+  onIgnore,
+  onRestore,
+  onIgnorePurchase,
+  onRestorePurchase,
+  onClose,
+}: ImportHealthDrawerProps): React.JSX.Element | null {
+  const isOpen =
+    target !== null &&
+    (completeness !== null ||
+      (target.panel === "purchase" && purchaseGaps.length > 0) ||
+      (target.panel === "ignored" && ignoredPurchaseGaps.length > 0));
+
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
+  if (!isOpen || !target) return null;
+
+  const panelLabel =
+    target.panel === "ignored"
+      ? "Items you've chosen to skip"
+      : target.panel === "sales"
+        ? "Sales days to import"
+        : target.panel === "inventory"
+          ? "Inventory days to import"
+          : "Purchase numbers to import";
+
+  if (
+    (target.panel === "sales" || target.panel === "inventory") &&
+    !completeness
+  )
+    return null;
+
+  return (
+    <FloatingPortal>
+      {/* An invisible click-catcher, not a dimmed backdrop — the page behind stays
+          exactly as it was, so switching branches or re-checking a figure never
+          means closing the drawer first. Clicking it (or Escape) still closes. */}
+      <div className="fixed inset-0 z-40" onClick={onClose} />
+      <aside
+        aria-label="Import health details"
+        className="animate-slide-in-right fixed top-0 right-0 z-50 flex h-full w-full flex-col border-l border-border bg-bg-base shadow-2xl sm:w-[26rem]"
+      >
+        <div className="flex items-center justify-between border-b border-border bg-bg-subtle px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-bold text-text-primary">
+              {branchName}
+            </h2>
+            <p className="text-xs text-text-muted">{panelLabel}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close (Esc)"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-bg-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+          >
+            <CloseIcon className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4">
+          {target.panel === "purchase" ? (
+            <div className="flex flex-col gap-4">
+              <p className="text-xs text-text-muted">
+                These purchase numbers are missing from the sequence. Find the
+                corresponding purchase files and import them.
+              </p>
+              <PurchaseGapSection
+                gaps={purchaseGaps}
+                canManage={canManage}
+                isUpdating={isUpdating}
+                onIgnore={onIgnorePurchase}
+              />
+            </div>
+          ) : target.panel === "ignored" ? (
+            <div className="flex flex-col gap-5">
+              <p className="text-xs text-text-muted">
+                These dates and purchase number gaps were marked as not needing
+                follow-up. Tick one and restore it if you do need to bring it
+                back.
+              </p>
+              {completeness && (
+                <>
+                  <DaySection
+                    title="Sales"
+                    branchId={target.branchId}
+                    importType="sales"
+                    days={completeness.sales.days.filter(
+                      (day) => day.status === "closed",
+                    )}
+                    mode="ignored"
+                    canManage={canManage}
+                    onIgnore={onIgnore}
+                    onRestore={onRestore}
+                    isUpdating={isUpdating}
+                  />
+                  <DaySection
+                    title="Inventory"
+                    branchId={target.branchId}
+                    importType="inventory"
+                    days={completeness.inventory.days.filter(
+                      (day) => day.status === "closed",
+                    )}
+                    mode="ignored"
+                    canManage={canManage}
+                    onIgnore={onIgnore}
+                    onRestore={onRestore}
+                    isUpdating={isUpdating}
+                  />
+                </>
+              )}
+              {ignoredPurchaseGaps.length > 0 && (
+                <PurchaseGapSection
+                  gaps={ignoredPurchaseGaps}
+                  mode="ignored"
+                  canManage={canManage}
+                  isUpdating={isUpdating}
+                  onRestore={onRestorePurchase}
+                />
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-4">
+              <p className="text-xs text-text-muted">
+                These days are still missing a file. If a day genuinely has no
+                data, tick it and choose Ignore instead of leaving it open.
+              </p>
+              <DaySection
+                title={target.panel === "sales" ? "Sales" : "Inventory"}
+                branchId={target.branchId}
+                importType={target.panel}
+                days={(target.panel === "sales"
+                  ? completeness!.sales
+                  : completeness!.inventory
+                ).days.filter((day) => day.status === "open")}
+                mode="missing"
+                canManage={canManage}
+                onIgnore={onIgnore}
+                onRestore={onRestore}
+                isUpdating={isUpdating}
+              />
+            </div>
+          )}
+        </div>
+      </aside>
+    </FloatingPortal>
+  );
+}

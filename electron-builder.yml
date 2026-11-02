@@ -1,0 +1,50 @@
+appId: com.branchwise.app
+productName: BranchWise
+directories:
+  buildResources: build
+# The app icon. electron-builder turns this one 1024px PNG into the .icns / .ico each
+# platform needs. Regenerate it with `npm run brand` after editing brand/branchwise-icon.svg.
+icon: build/icon.png
+files:
+  - "!**/.vscode/*"
+  - "!frontend/*"
+  - "!backend/*"
+  - "!electron.vite.config.{js,ts,mjs,cjs}"
+  - "!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}"
+  - "!{.env,.env.*,.npmrc,pnpm-lock.yaml}"
+  - "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}"
+asarUnpack:
+  - resources/**
+win:
+  executableName: branchwise-app2
+nsis:
+  artifactName: ${productName}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+mac:
+  # macOS insets its icons on a fixed grid, so it gets the padded variant; Windows and
+  # Linux keep the full-bleed build/icon.png set above.
+  icon: build/icon-macos.png
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    - NSCameraUsageDescription: Application requests access to the device's camera.
+    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+  notarize: false
+dmg:
+  # Includes the architecture so the Apple Silicon and Intel builds don't overwrite each other.
+  artifactName: ${productName}-${version}-${arch}.${ext}
+linux:
+  target: AppImage
+  maintainer: electronjs.org
+  category: Utility
+appImage:
+  artifactName: ${productName}-${version}.${ext}
+npmRebuild: false
+publish:
+  provider: github
+  owner: seinwinhtutAU
+  repo: branchwise-release
+  releaseType: release

@@ -1,0 +1,122 @@
+import datetime
+import uuid
+
+import pandas as pd
+from sqlalchemy.orm import Session
+
+from app.retail.models.import_batch import ImportType
+from app.retail.models.purchase import Purchase, PurchaseLine
+from app.retail.services.import_common import (
+    get_or_create_products,
+    new_import_batch,
+    pluralize,
+)
+
+
+def persist_purchases(
+    db: Session,
+    df: pd.DataFrame,
+    *,
+    branch_id: str | None,
+    location_raw: str | None,
+    source_file: str | None,
+    uploaded_by: str | None = None,
+    issue_count: int = 0,
+    purchase_date: datetime.date | None = None,
+    purchase_number: str | None = None,
+    purchase_date_source: str = "import_date",
+    storage_key: str | None = None,
+    request_key: str | None = None,
+) -> dict:
+    """Persist a purchase import as one new Purchase batch per call.
+
+    purchase.csv has no natural batch/date key in the source data, so every
+    confirmed import creates a fresh Purchase header with a PurchaseLine per
+    row. purchase_date applies to the whole batch (there's no per-line date
+    in the source data either) — it defaults to today but the confirm
+    endpoint lets the importer override it, e.g. when uploading a file for a
+    purchase that happened on an earlier day. Known limitation: re-confirming
+    the same file twice creates duplicate purchase records — there's no
+    source data to detect that with yet.
+    """
+    batch = new_import_batch(
+        ImportType.PURCHASE,
+        branch_id=branch_id,
+        uploaded_by=uploaded_by,
+        source_file=source_file,
+        storage_key=storage_key,
+        request_key=request_key,
+    )
+    db.add(batch)
+
+    effective_purchase_date = purchase_date or datetime.date.today()
+    summary = {
+        "batch_id": batch.id,
+        "purchase_id": None,
+        "purchase_number": purchase_number,
+        "purchase_date": effective_purchase_date.isoformat(),
+        "purchase_date_source": purchase_date_source,
+        "purchase_lines_created": 0,
+        "products_created": 0,
+        "products_updated": 0,
+        "issue_count": issue_count,
+    }
+
+    if df.empty:
+        summary["messages"] = ["No purchase items were found in this file — nothing was imported."]
+        batch.summary = summary
+        db.commit()
+        return summary
+
+    products, created, updated = get_or_create_products(
+        db, [(code, desc, None) for code, desc in zip(df["StockCode"], df["Description"])]
+    )
+    summary["products_created"] = created
+    summary["products_updated"] = updated
+
+    purchase = Purchase(
+        id=str(uuid.uuid4()),
+        branch_id=branch_id,
+        import_batch_id=batch.id,
+        location_raw=location_raw,
+        purchase_number=purchase_number,
+        purchase_date=effective_purchase_date,
+        source_file=source_file,
+    )
+    db.add(purchase)
+    summary["purchase_id"] = purchase.id
+
+    # Plain dicts, not iterrows() — same reasoning as validate_rows in import_common.
+    for row in df.to_dict(orient="records"):
+        db.add(
+            PurchaseLine(
+                purchase_id=purchase.id,
+                product_id=products[row["StockCode"]].id,
+                quantity=row["Quantity"],
+                uom=row["UOM"],
+                buying_price=row["Buying_Price"],
+            )
+        )
+        summary["purchase_lines_created"] += 1
+
+    total_items = len(df)
+    messages = [
+        f"{total_items:,} total purchase items in file",
+        f"{summary['purchase_lines_created']:,} purchase items recorded",
+    ]
+    if purchase_date_source == "filename":
+        messages.append(
+            f"Purchase date {effective_purchase_date.isoformat()} detected from filename"
+        )
+    elif purchase_date_source == "import_date":
+        messages.append(
+            "⚠️ Alert: No purchase date was found in the filename — today's date was used. Check and edit it if needed."
+        )
+    issue_count = summary.get("issue_count", 0)
+    if issue_count > 0:
+        messages.append(f"⚠️ Alert: {pluralize(issue_count, 'item')} recorded with invalid values")
+    summary["messages"] = messages
+
+    batch.summary = summary
+    db.commit()
+    return summary

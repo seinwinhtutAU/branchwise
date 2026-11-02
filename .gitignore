@@ -1,0 +1,74 @@
+node_modules
+dist
+dist-web
+out
+.DS_Store
+*.log*
+.eslintcache
+*.tsbuildinfo
+
+# Compiled output accidentally emitted next to the TypeScript sources. The tsconfigs set
+# noEmit so this shouldn't happen, but if it ever does the damage is silent and nasty:
+# Vite resolves .jsx before .tsx, so the app runs the stale compiled copy while the .tsx
+# on disk still looks correct. Ignoring them keeps a stray `tsc` run out of git at least.
+# frontend/ only — the backend is Python, and root-level JS configs are real source.
+frontend/**/*.js
+frontend/**/*.jsx
+frontend/**/*.d.ts
+# ...except these two, which are genuine hand-written sources, not build output.
+!frontend/preload/index.d.ts
+!frontend/renderer/src/env.d.ts
+# Same thing at the repo root: tsconfig.node.json includes electron.vite.config.*, so a
+# stray emit lands here rather than under frontend/. The .ts is the real source.
+electron.vite.config.js
+electron.vite.config.d.ts
+electron.vite.config.*.mjs
+
+# Python
+backend/.venv
+backend/__pycache__
+backend/**/__pycache__
+backend/*.egg-info
+backend/app.db
+app.db
+backend/.pytest_cache
+*.pyc
+
+# Editor swap files are crash-recovery artefacts, never source.
+*.swp
+
+# env files (never commit real secrets)
+.env
+backend/.env
+
+# real business data exports (not code, not for repo history)
+retail_data/
+
+# Word lock files (created while a .docx is open)
+~$*
+
+# .env backups (they carry live credentials)
+.env.*
+*.env.bak*
+
+# JetBrains IDE settings (personal, not project configuration)
+.idea/
+
+# Diagram sources and their rendered images — presentation material, kept locally
+# (the repo already dropped the earlier presentation documents for the same reason).
+diagram/
+
+wholesale_prototype
+
+# Saved assistant evaluation reports (tests/eval/README.md)
+backend/tests/eval/reports/
+
+# personal notes, not part of the project
+docs/dfd/
+docs/code-reading-guide.zh.md
+docs/note/
+
+# Personal resume & build artifacts
+resume_output/
+.ppt_build/
+

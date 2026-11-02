@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download BranchWise</title>
+<meta name="description" content="Download BranchWise for Mac and Windows.">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #ffffff; --card: #f9fafb; --border: #e5e7eb;
+    --text: #111827; --muted: #6b7280; --brand: #6366f1; --brand-hover: #4f46e5;
+    --code-bg: #eef2ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1117; --card: #181b24; --border: #2a2f3a; --text: #f9fafb; --muted: #9ca3af; --code-bg: #1e2140; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+    background: var(--bg); color: var(--text);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { width: 100%; max-width: 520px; padding: 56px 16px 24px; flex: 1; }
+  .hero { text-align: center; }
+  .logo { width: 72px; height: 72px; }
+  h1 { margin: 14px 0 4px; font-size: 30px; letter-spacing: -.01em; }
+  .tagline { margin: 0; color: var(--muted); }
+
+  .primary {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    margin: 28px 0 8px; padding: 15px 20px; border-radius: 12px;
+    background: var(--brand); color: #fff; font-size: 17px; font-weight: 600; text-decoration: none;
+    transition: background .15s;
+  }
+  .primary:hover { background: var(--brand-hover); }
+  .primary.disabled { opacity: .5; pointer-events: none; }
+  .primary svg { width: 20px; height: 20px; flex: none; }
+  .meta { text-align: center; color: var(--muted); font-size: 14px; min-height: 21px; }
+
+  .web {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin: 10px 0 0; padding: 12px 20px; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--card);
+    color: var(--text); font-weight: 500; text-decoration: none; transition: border-color .15s, color .15s;
+  }
+  .web:hover { border-color: var(--brand); color: var(--brand); }
+  .web svg { width: 18px; height: 18px; flex: none; }
+
+  section { margin-top: 28px; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
+  h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+
+  .downloads a.row {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 10px 0; border-top: 1px solid var(--border); color: var(--text); text-decoration: none;
+  }
+  .downloads a.row:first-of-type { border-top: 0; padding-top: 0; }
+  .downloads a.row:hover .name { color: var(--brand); }
+  .downloads a.row.missing { color: var(--muted); pointer-events: none; }
+  .downloads .name { font-weight: 500; }
+  .downloads .size { color: var(--muted); font-size: 13px; white-space: nowrap; }
+
+  ol { margin: 0; padding-left: 20px; }
+  ol li { margin: 6px 0; }
+  .steps[hidden] { display: none; }
+  .steps + .steps { margin-top: 18px; }
+  .steps h3 { margin: 0 0 6px; font-size: 15px; }
+  .cmd {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin: 8px 0 2px; padding: 8px 10px; border-radius: 8px; background: var(--code-bg);
+    font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: auto;
+  }
+  .cmd code { white-space: nowrap; }
+  .cmd button {
+    flex: none; border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    border-radius: 6px; padding: 3px 9px; font: inherit; font-family: inherit; cursor: pointer;
+  }
+  .cmd button:hover { border-color: var(--brand); color: var(--brand); }
+  .hint { color: var(--muted); font-size: 13px; }
+
+  footer { width: 100%; max-width: 520px; padding: 16px; text-align: center; color: var(--muted); font-size: 13px; }
+  footer a { color: var(--muted); text-decoration: none; margin: 0 8px; }
+  footer a:hover { color: var(--brand); text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+  <div class="hero">
+    <img class="logo" src="logo.svg" alt="">
+    <h1>BranchWise</h1>
+    <p class="tagline">Manage sales, inventory and purchases across every branch.</p>
+  </div>
+
+  <a class="primary disabled" id="primary" href="#">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0l-4.5-4.5M12 15l4.5-4.5M4 20h16"/></svg>
+    <span id="primary-label">Checking the latest version…</span>
+  </a>
+  <div class="meta" id="meta">&nbsp;</div>
+
+  <a class="web" id="web" href="https://branchwise-app2.vercel.app/" target="_blank" rel="noopener">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/></svg>
+    Or open the web version
+  </a>
+
+  <section class="downloads">
+    <h2>All downloads</h2>
+    <a class="row missing" id="win" href="#"><span class="name">Windows</span><span class="size"></span></a>
+    <a class="row missing" id="mac-arm" href="#"><span class="name">Mac — Apple Silicon (M1, M2, M3, M4)</span><span class="size"></span></a>
+    <a class="row missing" id="mac-intel" href="#"><span class="name">Mac — Intel</span><span class="size"></span></a>
+    <p class="hint" style="margin:12px 0 0">Not sure which Mac you have? Apple menu → About This Mac. "Chip: Apple …" means Apple Silicon.</p>
+  </section>
+
+  <section>
+    <h2>How to install</h2>
+
+    <div class="steps" id="steps-win">
+      <h3>Windows</h3>
+      <ol>
+        <li>Run the downloaded <em>BranchWise-…-setup.exe</em>.</li>
+        <li>If a blue "Windows protected your PC" box appears, click <em>More info</em>, then <em>Run anyway</em>.</li>
+      </ol>
+    </div>
+
+    <div class="steps" id="steps-mac">
+      <h3>Mac</h3>
+      <ol>
+        <li>Open the downloaded <em>.dmg</em> and drag BranchWise into <em>Applications</em>. Replace the old one if asked.</li>
+        <li>Open Terminal and run this once, otherwise the Mac says the app is "damaged":
+          <div class="cmd"><code>xattr -cr /Applications/BranchWise.app</code><button type="button" id="copy">Copy</button></div>
+        </li>
+        <li>Open BranchWise.</li>
+      </ol>
+      <p class="hint">Updating? On Mac, install each new version this way. The in-app "Restart and Update" does not work yet.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <a id="all-versions" href="https://github.com/seinwinhtutAU/branchwise-release/releases">All versions</a>
+  <a id="website" href="#" hidden>Website</a>
+</footer>
+
+<script>
+  // Reads the newest release of the release repo, so this page never needs editing for a new version.
+  var REPO = "seinwinhtutAU/branchwise-release";
+  // Put your own website address here and a "Website" link appears in the footer.
+  var WEBSITE_URL = "";
+
+  var ua = navigator.userAgent;
+  var isWin = /Windows/i.test(ua);
+  var isMac = /Macintosh|Mac OS X/i.test(ua);
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  if (WEBSITE_URL) { $("website").href = WEBSITE_URL; $("website").hidden = false; }
+
+  // Show the install steps for the visitor's own system first, and only that one when we know it.
+  if (isWin) $("steps-mac").hidden = true;
+  else if (isMac) $("steps-win").hidden = true;
+
+  $("copy").addEventListener("click", function () {
+    var btn = this;
+    navigator.clipboard.writeText("xattr -cr /Applications/BranchWise.app").then(function () {
+      btn.textContent = "Copied";
+      setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+    });
+  });
+
+  function mb(bytes) { return (bytes / 1048576).toFixed(0) + " MB"; }
+
+  function setLink(id, asset) {
+    if (!asset) return;
+    var el = $(id);
+    el.href = asset.browser_download_url;
+    el.classList.remove("missing");
+    el.querySelector(".size").textContent = mb(asset.size);
+  }
+
+  fetch("https://api.github.com/repos/" + REPO + "/releases/latest")
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function (rel) {
+      var assets = rel.assets || [];
+      function find(re) { return assets.filter(function (a) { return re.test(a.name); })[0]; }
+
+      var macArm = find(/arm64.*\.dmg$/i) || find(/^BranchWise-[\d.]+\.dmg$/i);
+      var macIntel = find(/x64.*\.dmg$/i);
+      var win = find(/setup\.exe$/i);
+
+      setLink("mac-arm", macArm);
+      setLink("mac-intel", macIntel);
+      setLink("win", win);
+
+      var version = String(rel.tag_name).replace(/^v/, "");
+      var date = rel.published_at ? new Date(rel.published_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+      $("meta").textContent = "Version " + version + (date ? " · " + date : "");
+
+      var primary = $("primary");
+      var pick = null, label = "";
+      if (isWin && win) { pick = win; label = "Download for Windows"; }
+      else if (isMac && macArm) { pick = macArm; label = "Download for Mac"; }
+
+      if (pick) {
+        primary.href = pick.browser_download_url;
+        $("primary-label").textContent = label;
+        primary.classList.remove("disabled");
+      } else {
+        $("primary-label").textContent = "Choose your computer below";
+      }
+    })
+    .catch(function () {
+      $("primary-label").textContent = "Unavailable";
+      $("meta").textContent = "Couldn't load the latest version. Please refresh, or open All versions below.";
+    });
+</script>
+</body>
+</html>

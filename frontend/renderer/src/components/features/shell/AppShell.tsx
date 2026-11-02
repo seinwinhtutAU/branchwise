@@ -1,0 +1,723 @@
+import { ExplainToggle } from "@renderer/components/features/explain/ExplainToggle";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useIsFetching } from "@tanstack/react-query";
+import { cn } from "@renderer/lib/utils";
+import { Badge } from "@renderer/components/ui/Badge";
+import {
+  BranchIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  LogOutIcon,
+  FactoryIcon,
+  SettingsIcon,
+} from "@renderer/components/ui/icons";
+import { LogoChip, LogoWordmark } from "@renderer/components/ui/Logo";
+import { Select } from "@renderer/components/ui/Select";
+import type { Profile } from "@renderer/components/features/types";
+import type { BranchOption } from "@renderer/lib/useBranches";
+import {
+  NetworkStatusDetails,
+  NetworkStatusDot,
+} from "@renderer/components/features/shell/NetworkIndicator";
+// Generic dropdown-menu plumbing (open/dismiss state, portal-positioned floating panel,
+// one menu row) — lives under wholesale/shared because that's where 3+ near-identical
+// copies first showed up, but it's business-agnostic; ImportHistoryTable (retail) already
+// imports it the same way this collapsed branch menu does.
+import {
+  FloatingLayer,
+  MenuItem,
+} from "@renderer/components/features/wholesale/shared/ui";
+import { useDismissableMenu } from "@renderer/components/features/wholesale/shared/useDismissableMenu";
+import { refreshEverything } from "@renderer/lib/queryClient";
+import { RefreshButton } from "@renderer/components/ui/RefreshButton";
+
+export interface NavItem {
+  id: string;
+  label: string;
+  /** Shown instead of `label` when the sidebar is collapsed — a 72px rail has no room
+   *  for "Supplier Vouchers". Falls back to `label`. */
+  shortLabel?: string;
+  icon: ReactNode;
+  dotColor?: string;
+  badgeCount?: number;
+}
+
+/** The value the branch selector holds while Wholesale is the one selected. Retail branches use
+ *  their own ids, and "" means all retail branches. */
+export const WHOLESALE_BRANCH_VALUE = "wholesale";
+
+interface AppShellProps {
+  navItems: NavItem[];
+  activeSection: string;
+  onSectionChange: (id: string) => void;
+  // "retail" or "wholesale": names the business in the header and picks its look.
+  activeWorkspace?: string;
+  // Which retail branch the app is currently scoped to, for accounts that can see more
+  // than one (development/admin/retail_management) — "" means "All branches". Only
+  // rendered when `retailBranches` is non-empty, so a branch-scoped account (retail,
+  // wholesale) never sees it.
+  retailBranches?: BranchOption[];
+  // Wholesale is a branch too, so accounts that can use both businesses pick it from the same
+  // selector (its value is WHOLESALE_BRANCH_VALUE). Picking it switches the app to Wholesale.
+  showWholesaleOption?: boolean;
+  selectedBranchId?: string;
+  onBranchChange?: (branchId: string) => void;
+  email: string | null | undefined;
+  profile: Profile | null;
+  onSignOut: () => void;
+  children: ReactNode;
+}
+
+const roleBadgeVariant: Record<string, "brand" | "info" | "default"> = {
+  development: "brand",
+  admin: "brand",
+  retail_management: "brand",
+  wholesale: "brand",
+  retail: "default",
+};
+
+const roleLabels: Record<string, string> = {
+  development: "Development",
+  admin: "Admin",
+  retail_management: "Retail management",
+  wholesale: "Wholesale management",
+  retail: "Retail user",
+};
+
+const SIDEBAR_STORAGE_KEY = "branchwise:sidebarCollapsed";
+
+function accountInitials(
+  profile: Profile | null,
+  email: string | null | undefined,
+): string {
+  const name = profile?.name?.trim() || email?.split("@")[0]?.trim() || "User";
+  const words = name.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  const compact = name.replace(/[^a-zA-Z0-9]/g, "");
+  if (compact.length <= 1) return compact.toUpperCase() || "U";
+  return (compact[0] + compact[compact.length - 1]).toUpperCase();
+}
+
+// The collapsed rail's stand-in for the expanded Select above: a raised store badge tile
+// with a floating selector caret that opens the branch list as a floating popup.
+function BranchSwitcherCollapsed({
+  branches,
+  showWholesaleOption,
+  selectedBranchId,
+  onBranchChange,
+}: {
+  branches: BranchOption[];
+  showWholesaleOption: boolean;
+  selectedBranchId: string;
+  onBranchChange?: (branchId: string) => void;
+}): React.JSX.Element {
+  const { open, setOpen, ref, toggle } = useDismissableMenu();
+  const wholesaleSelected = selectedBranchId === WHOLESALE_BRANCH_VALUE;
+  const currentLabel = wholesaleSelected
+    ? "Wholesale"
+    : (branches.find((branch) => branch.id === selectedBranchId)?.name ??
+      "All branches");
+
+  return (
+    <div className="relative w-full flex flex-col items-center" ref={ref}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-label={`Active branch: ${currentLabel}. Click to change.`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={`Active Branch: ${currentLabel} (Click to switch)`}
+        className="group flex flex-col items-center justify-center w-full focus-visible:outline-none app-no-drag"
+      >
+        <div
+          className={cn(
+            "relative w-9 h-9 rounded-lg flex items-center justify-center transition-all duration-150 border shadow-xs",
+            "group-focus-visible:ring-2 group-focus-visible:ring-brand group-focus-visible:ring-offset-1 group-focus-visible:ring-offset-bg-base",
+            selectedBranchId
+              ? "border-brand/40 bg-brand-subtle/50 text-brand group-hover:border-brand group-hover:bg-brand-subtle/80 active:scale-95"
+              : "border-border/90 bg-bg-base text-text-secondary group-hover:border-border-strong group-hover:text-text-primary group-hover:bg-bg-raised active:scale-95",
+          )}
+        >
+          {wholesaleSelected ? (
+            <FactoryIcon className="w-4 h-4 transition-transform duration-150 group-hover:scale-110" />
+          ) : (
+            <BranchIcon className="w-4 h-4 transition-transform duration-150 group-hover:scale-110" />
+          )}
+
+          {/* Floating corner indicator badge */}
+          <span
+            className={cn(
+              "absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-bg-base border flex items-center justify-center shadow-xs transition-colors",
+              selectedBranchId
+                ? "border-brand/50 text-brand group-hover:border-brand group-hover:bg-brand-subtle"
+                : "border-border text-text-muted group-hover:border-border-strong group-hover:text-text-secondary",
+            )}
+          >
+            <ChevronDownIcon className="w-2 h-2 stroke-[2.4]" />
+          </span>
+        </div>
+
+        {/* Branch Name Label */}
+        <span
+          className={cn(
+            "text-[10px] font-medium leading-tight text-center max-w-[68px] truncate mt-1 transition-colors",
+            selectedBranchId
+              ? "text-brand font-semibold"
+              : "text-text-secondary group-hover:text-text-primary",
+          )}
+        >
+          {selectedBranchId ? currentLabel : "All branches"}
+        </span>
+      </button>
+
+      {open && (
+        <FloatingLayer
+          anchorRef={ref}
+          align="right"
+          className="min-w-52 bg-bg-base border border-border rounded-xl shadow-lg p-1.5 animate-fade-in z-50"
+        >
+          <div className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-text-muted">
+            Retail Branch
+          </div>
+          <MenuItem
+            label="All branches"
+            icon={
+              selectedBranchId === "" ? (
+                <CheckIcon className="w-4 h-4 text-brand" />
+              ) : (
+                <BranchIcon className="w-4 h-4 text-text-muted/60" />
+              )
+            }
+            onClick={() => {
+              setOpen(false);
+              onBranchChange?.("");
+            }}
+          />
+          {branches.map((branch) => {
+            const isSelected = branch.id === selectedBranchId;
+            return (
+              <MenuItem
+                key={branch.id}
+                label={branch.name}
+                icon={
+                  isSelected ? (
+                    <CheckIcon className="w-4 h-4 text-brand" />
+                  ) : (
+                    <BranchIcon className="w-4 h-4 text-text-muted/60" />
+                  )
+                }
+                onClick={() => {
+                  setOpen(false);
+                  onBranchChange?.(branch.id);
+                }}
+              />
+            );
+          })}
+          {showWholesaleOption && (
+            <>
+              <div className="mt-1 border-t border-border px-2.5 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                Wholesale
+              </div>
+              <MenuItem
+                label="Wholesale"
+                icon={
+                  wholesaleSelected ? (
+                    <CheckIcon className="w-4 h-4 text-brand" />
+                  ) : (
+                    <FactoryIcon className="w-4 h-4 text-text-muted/60" />
+                  )
+                }
+                onClick={() => {
+                  setOpen(false);
+                  onBranchChange?.(WHOLESALE_BRANCH_VALUE);
+                }}
+              />
+            </>
+          )}
+        </FloatingLayer>
+      )}
+    </div>
+  );
+}
+
+// Layout wrapper — no skeleton/empty state (exempt per rubric).
+export function AppShell({
+  navItems,
+  activeSection,
+  onSectionChange,
+  activeWorkspace,
+  retailBranches = [],
+  showWholesaleOption = false,
+  selectedBranchId = "",
+  onBranchChange,
+  email,
+  profile,
+  onSignOut,
+  children,
+}: AppShellProps): React.JSX.Element {
+  const isMac = typeof window !== "undefined" && Boolean(window.api?.isMac);
+  const isWindows =
+    typeof window !== "undefined" && Boolean(window.api?.isWindows);
+  // Windows needs a renderer-owned title bar because its native controls are
+  // hidden into the overlay. macOS keeps the native title bar so traffic lights
+  // never sit on top of the app content.
+  const hasCustomTitleBar = isWindows;
+  const isRefreshing = useIsFetching() > 0;
+
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+
+  const currentSectionLabel = useMemo(() => {
+    if (activeSection === "settings") return "Settings";
+    const item = navItems.find((n) => n.id === activeSection);
+    if (item) return item.label;
+    return activeSection.charAt(0).toUpperCase() + activeSection.slice(1);
+  }, [activeSection, navItems]);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+
+    function handlePointer(event: PointerEvent): void {
+      if (
+        accountMenuRef.current &&
+        !accountMenuRef.current.contains(event.target as Node)
+      ) {
+        setAccountMenuOpen(false);
+      }
+    }
+
+    function handleFocus(event: FocusEvent): void {
+      if (
+        accountMenuRef.current &&
+        !accountMenuRef.current.contains(event.target as Node)
+      ) {
+        setAccountMenuOpen(false);
+      }
+    }
+
+    function handleKey(event: KeyboardEvent): void {
+      if (event.key === "Escape") setAccountMenuOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handlePointer, true);
+    document.addEventListener("focusin", handleFocus);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointer, true);
+      document.removeEventListener("focusin", handleFocus);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [accountMenuOpen]);
+
+  function handleToggleCollapse(): void {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(next));
+      } catch {
+        // Storage might fail in restricted sandbox, ignore
+      }
+      return next;
+    });
+  }
+
+  // Listen to menu actions and custom shortcut triggers
+  useEffect(() => {
+    const handleToggle = (): void => {
+      handleToggleCollapse();
+    };
+
+    window.addEventListener("branchwise:toggle-sidebar", handleToggle);
+
+    const cleanupMenu = window.api?.onMenuAction((action) => {
+      if (action === "toggle-sidebar") {
+        handleToggle();
+      }
+    });
+
+    return () => {
+      window.removeEventListener("branchwise:toggle-sidebar", handleToggle);
+      cleanupMenu?.();
+    };
+  }, []);
+
+  function renderSidebar(isCollapsed: boolean): React.JSX.Element {
+    return (
+      <div className="flex flex-col h-full select-none">
+        {/* Header row */}
+        <div
+          className={cn(
+            "flex items-center h-14 shrink-0 border-b border-border",
+            isCollapsed
+              ? "justify-center px-2 relative"
+              : "justify-between px-4",
+          )}
+        >
+          {isCollapsed ? (
+            <div className="flex items-center justify-center app-no-drag">
+              <LogoChip />
+            </div>
+          ) : (
+            <div className="flex items-center gap-2.5 min-w-0 app-no-drag">
+              <LogoChip />
+              <LogoWordmark />
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleToggleCollapse}
+            aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!isCollapsed}
+            className={cn(
+              "rounded-md flex items-center justify-center text-text-secondary hover:bg-bg-raised hover:text-text-primary transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand app-no-drag",
+              isCollapsed
+                ? "absolute -right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-bg-base border border-border shadow-xs z-10"
+                : "w-7 h-7",
+            )}
+          >
+            {isCollapsed ? (
+              <ChevronRightIcon className="w-3.5 h-3.5" />
+            ) : (
+              <ChevronLeftIcon className="w-4 h-4" />
+            )}
+          </button>
+        </div>
+
+        {/* Branch switcher — a branch-scoped account never gets `retailBranches` at all.
+            Collapsed rail has no room for a Select, so it gets a dedicated store badge tile
+            that opens the same choice as a floating popup instead. */}
+        {(retailBranches.length > 0 || showWholesaleOption) && (
+          <div
+            className={cn(
+              "pt-3 shrink-0 app-no-drag",
+              isCollapsed ? "px-1.5 flex flex-col items-center" : "px-3",
+            )}
+          >
+            {isCollapsed ? (
+              <>
+                <BranchSwitcherCollapsed
+                  branches={retailBranches}
+                  showWholesaleOption={showWholesaleOption}
+                  selectedBranchId={selectedBranchId}
+                  onBranchChange={onBranchChange}
+                />
+                <div
+                  className="w-10 h-px bg-border-strong mt-3 mb-0.5"
+                  aria-hidden="true"
+                />
+              </>
+            ) : (
+              <Select
+                size="sm"
+                label={
+                  <span className="flex items-center gap-1.5 text-xs font-medium text-text-secondary">
+                    <BranchIcon className="w-3.5 h-3.5 text-text-muted" />
+                    <span>Branch</span>
+                  </span>
+                }
+                value={selectedBranchId}
+                onChange={(e) => onBranchChange?.(e.target.value)}
+              >
+                <optgroup label="Retail">
+                  <option value="">All branches</option>
+                  {retailBranches.map((branch) => (
+                    <option key={branch.id} value={branch.id}>
+                      {branch.name}
+                    </option>
+                  ))}
+                </optgroup>
+                {showWholesaleOption && (
+                  <optgroup label="Wholesale">
+                    <option value={WHOLESALE_BRANCH_VALUE}>Wholesale</option>
+                  </optgroup>
+                )}
+              </Select>
+            )}
+          </div>
+        )}
+
+        {/* Nav list */}
+        <nav
+          className={cn(
+            "flex-1 overflow-y-auto py-3 flex flex-col gap-1",
+            isCollapsed ? "px-1.5 items-center" : "px-3",
+          )}
+        >
+          {navItems.map((item) => {
+            const active = item.id === activeSection;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  onSectionChange(item.id);
+                }}
+                aria-current={active ? "page" : undefined}
+                aria-label={item.label}
+                title={item.label}
+                className={cn(
+                  "relative rounded-lg font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-1 focus-visible:ring-offset-bg-base app-no-drag",
+                  isCollapsed
+                    ? "flex flex-col items-center justify-center h-14 w-full px-1 text-center"
+                    : "flex items-center gap-3 h-10 px-3 text-sm",
+                  active
+                    ? "bg-brand-subtle text-brand shadow-xs font-semibold"
+                    : "text-text-secondary hover:bg-bg-raised hover:text-text-primary",
+                )}
+              >
+                {/* Active indicator bar / Category indicator */}
+                {(active || item.dotColor) && (
+                  <span
+                    className={cn(
+                      "absolute left-0 w-1 rounded-r transition-all duration-150",
+                      isCollapsed ? "top-2.5 bottom-2.5" : "top-1.5 bottom-1.5",
+                      active ? "bg-brand" : item.dotColor,
+                    )}
+                    aria-hidden="true"
+                  />
+                )}
+
+                {isCollapsed ? (
+                  <>
+                    <div className="relative shrink-0 flex items-center justify-center">
+                      {item.icon}
+                      {!!item.badgeCount && (
+                        <span className="absolute -top-1.5 -right-2 min-w-4 h-4 px-1 flex items-center justify-center rounded-full bg-error text-white text-[10px] font-bold leading-none pointer-events-none">
+                          {item.badgeCount}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[10px] leading-tight font-medium text-center max-w-full mt-1">
+                      {item.shortLabel ?? item.label}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="shrink-0">{item.icon}</span>
+                    <span className="flex-1 text-left">{item.label}</span>
+                    {!!item.badgeCount && (
+                      <Badge variant="error" className="shrink-0">
+                        {item.badgeCount}
+                      </Badge>
+                    )}
+                  </>
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Footer */}
+        {!isCollapsed && (
+          <div className="border-t border-border flex flex-col shrink-0 p-4 gap-1">
+            <span className="text-sm font-medium text-text-primary truncate">
+              {profile?.name ?? email}
+            </span>
+            <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+              {profile?.role && (
+                <Badge variant={roleBadgeVariant[profile.role] ?? "default"}>
+                  {roleLabels[profile.role] ?? profile.role}
+                </Badge>
+              )}
+              {profile?.branch_name && (
+                <span className="text-xs text-text-muted">
+                  {profile.branch_name}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "h-screen overflow-hidden bg-bg-base flex flex-col",
+        // Wholesale repaints the shared tokens blue for everything inside it — see
+        // globals.css's .workspace-wholesale block.
+        activeWorkspace === "wholesale" && "workspace-wholesale",
+      )}
+    >
+      {/* Windows custom title bar; macOS uses its native title bar. */}
+      {hasCustomTitleBar && (
+        <div
+          className={cn(
+            "h-10 shrink-0 w-full flex items-center justify-between px-4 app-drag-region select-none bg-bg-subtle border-b border-border/70 text-xs text-text-muted z-40",
+            isWindows && "pr-[140px]",
+          )}
+        >
+          <div className="flex items-center gap-2 font-medium">
+            <span className="text-text-secondary font-semibold">
+              Branch<span className="text-brand">Wise</span>
+            </span>
+            <span className="text-border">/</span>
+            <span className="capitalize">{activeWorkspace ?? "workspace"}</span>
+            {currentSectionLabel && (
+              <>
+                <span className="text-border">/</span>
+                <span className="text-text-primary">{currentSectionLabel}</span>
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-3 app-no-drag">
+            <span className="text-[11px] text-text-muted/70 hidden sm:inline-block">
+              {isMac
+                ? "⌘B Sidebar · ⌘, Settings"
+                : "Ctrl+B Sidebar · Ctrl+, Settings"}
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex-1 flex min-h-0">
+        {/* Desktop sidebar */}
+        <aside
+          className={cn(
+            "shrink-0 border-r border-border bg-bg-raised transition-[width] duration-200 select-none",
+            collapsed ? "w-[5.25rem]" : "w-64",
+          )}
+        >
+          <div
+            className={cn(
+              "fixed z-50 border-r-2 border-border bg-bg-raised transition-[width] duration-200",
+              hasCustomTitleBar
+                ? "top-10 h-[calc(100vh-2.5rem)]"
+                : "top-0 h-screen",
+              collapsed ? "w-[5.25rem]" : "w-64",
+            )}
+          >
+            {renderSidebar(collapsed)}
+          </div>
+        </aside>
+
+        <div
+          className="flex-1 min-h-0 min-w-0 flex flex-col bg-bg-subtle"
+          style={
+            {
+              "--sidebar-width": collapsed ? "5.25rem" : "16rem",
+            } as React.CSSProperties
+          }
+        >
+          {/* Sticky so the section title and network indicator stay visible while scrolling. */}
+          <div
+            data-app-header
+            className="sticky top-0 z-40 flex flex-col shrink-0"
+          >
+            {/* Header Bar */}
+            <div className="h-14 shrink-0 flex items-center justify-between px-6 border-b border-border/60 text-sm text-text-muted select-none bg-bg-subtle">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="text-base font-semibold text-text-secondary truncate">
+                  Branch<span className="text-brand">Wise</span>
+                </span>
+                <span className="text-base text-border font-light">/</span>
+                <span className="capitalize text-base text-text-muted shrink-0">
+                  {activeWorkspace ?? "workspace"}
+                </span>
+                {currentSectionLabel && (
+                  <>
+                    <span className="text-base text-border font-light">/</span>
+                    <span className="text-base font-medium text-text-primary truncate">
+                      {currentSectionLabel}
+                    </span>
+                  </>
+                )}
+              </div>
+              <div className="flex items-center gap-3 app-no-drag">
+                {(isMac || isWindows) && (
+                  <span className="text-xs text-text-muted/70 hidden sm:inline-block">
+                    {isMac
+                      ? "⌘B Sidebar · ⌘, Settings"
+                      : "Ctrl+B Sidebar · Ctrl+, Settings"}
+                  </span>
+                )}
+                <ExplainToggle />
+                <RefreshButton
+                  onClick={refreshEverything}
+                  refreshing={isRefreshing}
+                  title="Refresh page data"
+                  aria-label="Refresh page data"
+                />
+                <div className="relative" ref={accountMenuRef}>
+                  <button
+                    type="button"
+                    aria-label="Open account menu"
+                    aria-haspopup="menu"
+                    aria-expanded={accountMenuOpen}
+                    onClick={() => setAccountMenuOpen((open) => !open)}
+                    className="relative flex h-9 w-9 items-center justify-center rounded-full bg-brand text-xs font-bold text-white shadow-xs transition-colors hover:bg-brand/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-1 focus-visible:ring-offset-bg-base"
+                  >
+                    {accountInitials(profile, email)}
+                    <NetworkStatusDot />
+                  </button>
+                  {accountMenuOpen && (
+                    <div
+                      role="menu"
+                      aria-label="Account menu"
+                      className="absolute right-0 top-full z-50 mt-2 w-52 rounded-lg border border-border bg-bg-base p-1.5 text-sm shadow-lg"
+                    >
+                      <div className="border-b border-border px-2.5 pb-2 pt-1">
+                        <p className="truncate font-medium text-text-primary">
+                          {profile?.name || email || "User"}
+                        </p>
+                        {profile?.role && (
+                          <p className="mt-0.5 text-xs capitalize text-text-muted">
+                            {roleLabels[profile.role] ?? profile.role}
+                          </p>
+                        )}
+                      </div>
+                      <NetworkStatusDetails />
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setAccountMenuOpen(false);
+                          onSectionChange("settings");
+                        }}
+                        className="mt-1 flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-text-secondary transition-colors hover:bg-bg-raised hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                      >
+                        <SettingsIcon className="h-4 w-4" />
+                        Settings
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setAccountMenuOpen(false);
+                          onSignOut();
+                        }}
+                        className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-error transition-colors hover:bg-error-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error"
+                      >
+                        <LogOutIcon className="h-4 w-4" />
+                        Sign out
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+          <main
+            data-app-content
+            className="relative flex min-h-0 w-full flex-1 flex-col gap-3 overflow-y-auto bg-bg-subtle px-3.5 py-3 sm:gap-3.5 sm:px-4.5 sm:py-3.5"
+          >
+            {children}
+          </main>
+        </div>
+      </div>
+    </div>
+  );
+}
