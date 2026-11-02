@@ -1,35 +1,29 @@
 # BranchWise
 
-BranchWise is an offline-resilient desktop management platform designed for multi-branch retail stores and wholesale operations. It integrates POS report processing, physical inventory reconciliation, cargo & logistics tracking, and an AI-powered business analytics assistant into a single, cohesive workflow.
+**BranchWise** is a desktop management platform built for multi-branch retail and wholesale businesses.
 
----
+It brings sales reporting, inventory management, logistics tracking, and AI-powered business analytics into one platform, helping businesses monitor operations and make better decisions.
+
+## ✨ Key Features
+
+- **Sales Management** – Process and analyze POS reports across multiple branches.
+- **Inventory Management** – Track stock levels and reconcile physical inventory.
+- **Logistics Tracking** – Monitor wholesale cargo and delivery progress.
+- **AI Business Assistant** – Understand business data and get insights through AI-powered analysis.
+- **Multi-Branch Overview** – Monitor business performance across different locations.
 
 ## 🛠️ Tech Stack
 
-### Desktop & Frontend
-- **Framework:** Electron + React 18 (TypeScript)
-- **Bundler:** Vite
-- **Styling:** Tailwind CSS
-- **State & Data Fetching:** TanStack Query (React Query)
-- **Icons & UI:** Lucide React
+- **Frontend:** Electron, React, TypeScript, Tailwind CSS
+- **Backend:** Python, FastAPI, SQLAlchemy
+- **Database:** PostgreSQL
+- **AI:** OpenAI, DeepSeek, Hybrid Search
+- **Tools:** Vite, TanStack Query, Alembic
 
-### Backend & API
-- **Framework:** FastAPI (Python 3.11+)
-- **Server:** Uvicorn
-- **ORM & Migrations:** SQLAlchemy 2.0, Alembic
-- **Database:** SQLite (local development) / PostgreSQL (production)
-- **Validation:** Pydantic v2
+## 🚀 Getting Started
 
-### AI & Data Engine
-- **LLM Integration:** OpenAI / DeepSeek (streaming via Server-Sent Events)
-- **Knowledge Retrieval:** Hybrid search (BM25 + Cloudflare Workers AI vector embeddings)
-- **Data Cleansing:** Pandas, Pyidaungsu
+### Backend
 
----
-
-## 🚀 Quick Start
-
-### 1. Backend
 ```bash
 cd backend
 python3 -m venv .venv
@@ -40,13 +34,12 @@ python scripts/seed_retail_accounts.py
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 2. Frontend
+### Frontend
+
 ```bash
 npm install
 npm run dev
 ```
-
----
 
 ## 📄 License
 
