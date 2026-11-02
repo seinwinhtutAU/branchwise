@@ -1,3 +1,4 @@
+import "@renderer/lib/demoMock";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
