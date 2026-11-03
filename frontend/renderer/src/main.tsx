@@ -9,6 +9,12 @@ import { ToastProvider } from "@renderer/lib/toast";
 import { applyTheme, getCachedTheme } from "@renderer/lib/theme";
 import "./styles/globals.css";
 
+// Auto-recover when a new deployment invalidates old chunk hashes
+window.addEventListener("vite:preloadError", (event) => {
+  event.preventDefault();
+  window.location.reload();
+});
+
 // Applied before the first render, from the last theme fetched from the backend, so the
 // app doesn't flash the system-default theme while it boots and re-fetches the
 // business-wide setting (see lib/appSettings.ts).
