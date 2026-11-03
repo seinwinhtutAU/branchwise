@@ -489,16 +489,23 @@ def _seed_write_offs(db, branch: Branch, entries: list[dict], *, dry_run: bool, 
     }
     created = 0
     for entry in entries:
+        if dry_run:
+            created += 1
+            continue
         when = datetime.fromisoformat(entry["date"] + "T09:00:00")
         if entry["subject"] == "shipment":
-            shipment = shipments[entry["shipment_no"]]
+            shipment = shipments.get(entry["shipment_no"])
+            if not shipment:
+                continue
             row = dict(
                 subject_type="shipment", subject_id=shipment.id, reference=shipment.shipment_no,
                 description=next((stop.stop_name for stop in shipment.stops if stop.is_gate), ""), stock_code=shipment.voucher_no,
                 quantity=entry["packages"], unit="package",
             )
         else:
-            line = lines[(entry["voucher_no"], entry["stock_code"])]
+            line = lines.get((entry["voucher_no"], entry["stock_code"]))
+            if not line:
+                continue
             pairs = to_pairs(entry["sets"], WholesaleUnit.SET)
             row = dict(
                 subject_type="voucher_line", subject_id=line.id, reference=entry["voucher_no"],
@@ -509,8 +516,6 @@ def _seed_write_offs(db, branch: Branch, entries: list[dict], *, dry_run: bool, 
         if key in existing:
             continue
         created += 1
-        if dry_run:
-            continue
         if entry["subject"] != "shipment":
             line.lost_quantity_pairs += pairs
         db.add(WholesaleWriteOff(
