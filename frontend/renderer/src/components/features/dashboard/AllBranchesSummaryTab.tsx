@@ -317,8 +317,8 @@ export function AllBranchesSummaryTab({
   const url = dashboardUrl("all-summary", "", { period, dateFrom, dateTo, month });
   const { data, isRefreshing, failed, reload } = useUrlQuery<AllSummaryDashboardData>(url, session, "All branches summary");
 
-  if (!data) {
-    if (failed) {
+  if (!data || !data.kpis) {
+    if (failed || data) {
       return (
         <EmptyState
           icon={<DashboardIcon />}

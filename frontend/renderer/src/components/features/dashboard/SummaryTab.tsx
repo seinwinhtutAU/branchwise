@@ -339,8 +339,8 @@ export function SummaryTab({
     );
   }
 
-  if (data === null) {
-    if (failed) {
+  if (data === null || !data.kpis) {
+    if (failed || data) {
       return (
         <EmptyState
           icon={<DashboardIcon />}

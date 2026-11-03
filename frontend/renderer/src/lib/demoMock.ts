@@ -101,10 +101,7 @@ export function setupDemoMock(): void {
     if (hasLiveBackend) {
       try {
         const resp = await originalFetch(input, init);
-        const cType = resp.headers.get("content-type") || "";
-        if (resp.ok && cType.includes("application/json")) {
-          return resp;
-        }
+        return resp;
       } catch {
         // Fall back to Mock
       }
@@ -456,6 +453,14 @@ export function setupDemoMock(): void {
     }
 
     // 8. AI Chat Assistant
+    if (path.includes("/api/chat/stream") || path.includes("/api/chat/explain/stream")) {
+      const sseContent = `event: meta\ndata: {"conversation_id": "demo-conv"}\n\nevent: status\ndata: {"text": "Thinking"}\n\nevent: answer\ndata: {"conversation_id": "demo-conv", "message": {"id": "msg-demo", "role": "assistant", "content": "Hello! I am the **BranchWise Business Copilot**. Based on simulated retail data across your active branches, everything is operating smoothly. How can I assist you further?", "created_at": "${new Date().toISOString()}", "citations": []}}\n\n`;
+      return new Response(sseContent, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }
+
     if (path.includes("/api/chat/frequent-topic")) {
       return json({ topic: "Sales Performance across branches today" });
     }
