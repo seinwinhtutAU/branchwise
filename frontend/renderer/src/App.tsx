@@ -257,7 +257,7 @@ const WORKSPACE_SECTION_IDS: Record<Workspace, Set<string>> = {
 // sign-in if they actually live in Wholesale.
 // The password every seeded account shares in development.
 // Eight characters because Neon Auth refuses anything shorter.
-const DEV_PASSWORD = import.meta.env.DEV ? "12345678" : "";
+const DEV_PASSWORD = "12345678";
 
 const WORKSPACE_STORAGE_KEY = "branchwise:lastWorkspace";
 
@@ -977,7 +977,7 @@ function App(): React.JSX.Element {
     setSubmitting(true);
     try {
       const loginEmail = email.trim() || "admin@branchwise.app";
-      const loginPass = password || "12345678";
+      const loginPass = password || DEV_PASSWORD;
       setSession(await signIn(loginEmail, loginPass));
     } catch (error) {
       showToast(
@@ -991,7 +991,7 @@ function App(): React.JSX.Element {
 
   async function handleDemoLogin(demoEmail: string): Promise<void> {
     try {
-      setSession(await signIn(demoEmail, "12345678"));
+      setSession(await signIn(demoEmail, DEV_PASSWORD));
     } catch (error) {
       showToast(
         "error",

@@ -117,7 +117,8 @@ export function setupDemoMock(): void {
         headers: { "Content-Type": "application/json" },
       });
 
-    const method = (init?.method || "GET").toUpperCase();
+    const _method = (init?.method || "GET").toUpperCase();
+    void _method;
     const url = new URL(urlStr, window.location.origin);
     const path = url.pathname;
 
