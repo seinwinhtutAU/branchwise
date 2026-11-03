@@ -448,21 +448,21 @@ export function useHydrateMasterData(session: Session): void {
     "wholesale master data",
   );
   useEffect(() => {
-    if (products.data) hydrateProducts(products.data);
+    if (Array.isArray(products.data)) hydrateProducts(products.data);
   }, [products.data]);
   useEffect(() => {
-    if (suppliers.data) hydrateSuppliers(suppliers.data);
+    if (Array.isArray(suppliers.data)) hydrateSuppliers(suppliers.data);
   }, [suppliers.data]);
   useEffect(() => {
-    if (customers.data) hydrateCustomers(customers.data);
+    if (Array.isArray(customers.data)) hydrateCustomers(customers.data);
   }, [customers.data]);
   useEffect(() => {
-    if (carriers.data) hydrateCarriers(carriers.data);
+    if (Array.isArray(carriers.data)) hydrateCarriers(carriers.data);
   }, [carriers.data]);
   useEffect(() => {
-    if (places.data) hydratePlaces(places.data);
+    if (Array.isArray(places.data)) hydratePlaces(places.data);
   }, [places.data]);
   useEffect(() => {
-    if (feeTypes.data) hydrateFeeTypes(feeTypes.data);
+    if (Array.isArray(feeTypes.data)) hydrateFeeTypes(feeTypes.data);
   }, [feeTypes.data]);
 }

@@ -85,6 +85,8 @@ class Settings(BaseSettings):
         # build can reach the local/remote API without weakening CORS globally.
         "null",
         "https://branchwise-app2.vercel.app",
+        "https://branchwise-demo.vercel.app",
+        "https://branchwise-demo-backend-ma74.onrender.com",
         "app://-",
     ]
 

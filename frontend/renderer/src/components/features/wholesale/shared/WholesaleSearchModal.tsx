@@ -136,7 +136,7 @@ export function WholesaleSearchModal({
     const items: SearchResultItem[] = [];
 
     // 1. Customers
-    if (customersQuery.data) {
+    if (Array.isArray(customersQuery.data)) {
       for (const c of customersQuery.data) {
         if (
           !q ||
@@ -158,7 +158,7 @@ export function WholesaleSearchModal({
     }
 
     // 2. Suppliers
-    if (suppliersQuery.data) {
+    if (Array.isArray(suppliersQuery.data)) {
       for (const s of suppliersQuery.data) {
         if (!q || s.name.toLowerCase().includes(q)) {
           const phone = typeof s.phone === "string" ? s.phone : undefined;
@@ -177,7 +177,7 @@ export function WholesaleSearchModal({
     }
 
     // 3. Products
-    if (productsQuery.data) {
+    if (Array.isArray(productsQuery.data)) {
       for (const p of productsQuery.data) {
         if (
           !q ||
@@ -197,7 +197,7 @@ export function WholesaleSearchModal({
     }
 
     // 4. Orders
-    if (ordersQuery.data) {
+    if (Array.isArray(ordersQuery.data)) {
       for (const o of ordersQuery.data) {
         if (
           !q ||
@@ -220,7 +220,7 @@ export function WholesaleSearchModal({
     }
 
     // 5. Vouchers
-    if (vouchersQuery.data) {
+    if (Array.isArray(vouchersQuery.data)) {
       for (const v of vouchersQuery.data) {
         if (
           !q ||
@@ -243,7 +243,7 @@ export function WholesaleSearchModal({
     }
 
     // 6. Shipments
-    if (shipmentsQuery.data) {
+    if (Array.isArray(shipmentsQuery.data)) {
       for (const s of shipmentsQuery.data) {
         if (
           !q ||

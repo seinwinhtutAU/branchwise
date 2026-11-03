@@ -438,6 +438,23 @@ export function setupDemoMock(): void {
       ]);
     }
 
+    // 7. Wholesale endpoints mock fallback
+    if (
+      path.includes("/api/wholesale/customers") ||
+      path.includes("/api/wholesale/suppliers") ||
+      path.includes("/api/wholesale/products") ||
+      path.includes("/api/wholesale/carriers") ||
+      path.includes("/api/wholesale/places") ||
+      path.includes("/api/wholesale/fee-types") ||
+      path.includes("/api/wholesale/receivings") ||
+      path.includes("/api/wholesale/shipments") ||
+      path.includes("/api/wholesale/vouchers") ||
+      path.includes("/api/wholesale/stock") ||
+      path.includes("/api/wholesale/transfers")
+    ) {
+      return json([]);
+    }
+
     // 8. AI Chat Assistant
     if (path.includes("/api/chat/frequent-topic")) {
       return json({ topic: "Sales Performance across branches today" });
@@ -457,7 +474,7 @@ export function setupDemoMock(): void {
     }
 
     // Default fallback for any unspecified endpoint
-    return json({ status: "ok", data: [], message: "Demo Mode Mock Response" });
+    return json([]);
   };
 }
 
