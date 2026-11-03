@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +10,13 @@ class Settings(BaseSettings):
     port: int = 8000
 
     database_url: str = "sqlite:///./app.db"
+
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql://", 1)
+        return v
 
     # Logins moved from Supabase Auth to Neon Auth (managed Better Auth) on 2026-09-05,
     # when the Supabase project was shut down. Nothing Supabase remains — an old .env
